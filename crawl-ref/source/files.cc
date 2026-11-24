@@ -49,6 +49,7 @@
 #include "dungeon.h"
 #include "end.h"
 #include "english.h"
+#include "party.h"
 #include "tile-env.h"
 #include "errors.h"
 #include "player-save-info.h"
@@ -2302,6 +2303,8 @@ bool load_level(dungeon_feature_type stair_taken, load_mode_type load_mode,
     if (load_mode == LOAD_ENTER_LEVEL)
     {
         place_followers();
+        // The rest of the party comes along (stairs, shafts, banishment...).
+        party_follow_to_current_level();
         place_transiting_monsters();
 
         // Silently recreate crystals on new floor.

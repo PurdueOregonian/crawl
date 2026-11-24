@@ -677,6 +677,8 @@ public:
 
     int         view_delay;
 
+    int         party_size;             // hotseat party (multiplayer prototype)
+
     bool        arena_dump_msgs;
     bool        arena_dump_msgs_all;
     bool        arena_list_eq;

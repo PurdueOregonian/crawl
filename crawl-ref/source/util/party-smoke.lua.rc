@@ -1,0 +1,44 @@
+<
+local step = 0
+local passes = 0
+local function d(code) return crawl.call_dlua(code) end
+local function log(s) crawl.stderr("SMOKE " .. s .. "\n") end
+local function state()
+  return d([[local x1,y1 = party.pos(1); local x2,y2 = party.pos(2)
+    return string.format("size=%d active=%d p1=%s(%d,%d) p2=%s(%d,%d) time=%d",
+      party.size(), party.active(), party.where(1), x1, y1, party.where(2), x2, y2, you.time())]])
+end
+function ready()
+  passes = passes + 1
+  if passes > 200 then log("GAVE UP " .. state()); crawl.sendkeys(string.char(17)); return end
+  if step == 0 then
+    log("START " .. state())
+    if d("return party.size()") ~= 2 then log("FAIL party did not start"); step = 99; return end
+    step = 1
+    crawl.sendkeys("s")       -- player 1 waits; turn should pass
+  elseif step == 1 then
+    log("AFTER P1 WAIT " .. state())
+    if d("return party.active()") ~= 2 then log("FAIL turn did not pass") ; step = 99; return end
+    step = 2
+    crawl.sendkeys("s")       -- player 2 waits; round completes
+  elseif step == 2 then
+    log("AFTER ROUND " .. state())
+    -- Put stairs under player 1 and go down.
+    d([[local x,y = you.pos(); dgn.grid(x, y, "stone_stairs_down_i")]])
+    step = 3
+    crawl.sendkeys(">")
+  elseif step == 3 then
+    if d("return party.where(1)") == "D:2" then
+      log("ARRIVED " .. state())
+      local same = d([[return party.where(1) == party.where(2)]])
+      log(same and "PASS party together on D:2" or "FAIL player 2 left behind")
+      step = 99
+    elseif d("return party.active()") == 2 then
+      crawl.sendkeys("s")     -- player 2 waits while player 1 climbs
+    end
+  elseif step == 99 then
+    log("DONE")
+    step = 100
+  end
+end
+>

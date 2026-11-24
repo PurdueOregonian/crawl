@@ -409,6 +409,18 @@ LUAFN(debug_cpp_assert)
 
 // Defined in main.cc; not exposed in a header.
 void world_reacts();
+void debug_run_input_once();
+
+// Run one iteration of the real main input loop, consuming keys queued with
+// crawl.sendkeys(). Exercises the same path as interactive play.
+LUAFN(debug_input_once)
+{
+    UNUSED(ls);
+    if (env.markers.need_activate())
+        env.markers.activate_all(false);
+    debug_run_input_once();
+    return 0;
+}
 
 // Simulate the player spending `aut` units of time (default 10, one normal
 // turn) and let the rest of the world react, exactly as the main loop does
@@ -528,6 +540,7 @@ const struct luaL_Reg debug_dlib[] =
 { "disable", debug_disable },
 { "cpp_assert", debug_cpp_assert },
 { "pass_turn", debug_pass_turn },
+{ "input_once", debug_input_once },
 { "reset_rng", debug_reset_rng },
 { "get_rng_state", debug_get_rng_state },
 { "check_moncasts", debug_check_moncasts },

@@ -18,6 +18,7 @@
 #include "coord.h"
 #include "coordit.h"
 #include "dgn-overview.h"
+#include "party.h"
 #include "tile-env.h"
 #include "god-conduct.h"
 #include "god-passive.h"
@@ -421,6 +422,23 @@ static void _draw_player(screen_cell_t *cell,
         tile_apply_animations(cell->tile.bg.tile(), &tile_env.flv(gc));
 #else
     UNUSED(anim_updates);
+#endif
+}
+
+// Another party member (not the player currently in `you`).
+static void _draw_party_member(screen_cell_t *cell, const coord_def &gc,
+                               int idx)
+{
+    static const COLOURS party_colours[] = { WHITE, LIGHTCYAN, YELLOW,
+                                             LIGHTMAGENTA };
+    const player &p = party_member(idx);
+    cell->glyph  = mons_char(p.symbol);
+    cell->colour = party_colours[idx % ARRAYSZ(party_colours)];
+    cell->colour = real_colour(cell->colour, gc);
+#ifdef USE_TILE
+    cell->tile.fg = tileidx_player();
+    cell->tile.bg = tile_env.bk_bg(gc);
+    cell->tile.cloud = tile_env.bk_cloud(gc);
 #endif
 }
 
@@ -929,6 +947,11 @@ void draw_cell(screen_cell_t *cell, const coord_def &gc,
              && !crawl_state.arena_suspended)
     {
         _draw_player(cell, gc, anim_updates);
+    }
+    else if (you.see_cell(gc) && party_member_at(gc) >= 0
+             && _layers & Layer::PLAYER)
+    {
+        _draw_party_member(cell, gc, party_member_at(gc));
     }
     else if (you.see_cell(gc))
         _draw_los(cell, gc, anim_updates);

@@ -52,14 +52,15 @@ assert(mon, "failed to place goblin")
 party.switch_to(1)
 local moved = false
 for round = 1, 3 do
-  local before = mon.abs_x
+  local bx, by = mon.abs_x, mon.abs_y
   party.spend(10)
-  assert(mon.abs_x == before,
+  assert(mon.abs_x == bx and mon.abs_y == by,
          "monster acted before player 2 had their turn (round " .. round .. ")")
   assert(party.active() == p2, "control did not pass to player 2")
   party.spend(10)
   assert(party.active() == 1, "control did not return to player 1")
-  if mon.abs_x ~= before then
+  -- Any movement counts: an unaware monster wanders rather than approaches.
+  if mon.abs_x ~= bx or mon.abs_y ~= by then
     moved = true
     break
   end
@@ -67,12 +68,15 @@ end
 assert(moved, "monster never acted after completed rounds")
 
 -- 3. Targeting: the goblin is nearer player 1, so it should approach them.
-for i = 1, 12 do
-  party.spend(10)
-  party.spend(10)
-end
+-- Give it time to notice someone (stealth rolls), close in and swing.
 local function cheb(ax, ay, bx, by)
   return math.max(math.abs(ax - bx), math.abs(ay - by))
+end
+for i = 1, 40 do
+  party.spend(10)
+  party.spend(10)
+  local hp1, max1 = party.hp(1)
+  if hp1 < max1 then break end
 end
 x1, y1 = party.pos(1)
 assert(cheb(mon.abs_x, mon.abs_y, x1, y1) <= 1,

@@ -11,15 +11,27 @@
 #include <memory>
 #include <vector>
 
+#include "abyss.h"
 #include "cluautil.h"
 #include "coord.h"
+#include "coordit.h"
 #include "env.h"
+#include "fineff.h"
 #include "l-libs.h"
+#include "level-id.h"
+#include "los.h"
 #include "losglobal.h"
 #include "mapmark.h"
+#include "message.h"
 #include "monster.h"
+#include "mon-util.h"
+#include "output.h"
 #include "player.h"
 #include "player-reacts.h"
+#include "religion.h"
+#include "state.h"
+#include "stringutil.h"
+#include "terrain.h"
 
 // Defined in main.cc; not exposed in a header.
 void world_reacts();
@@ -191,21 +203,73 @@ void party_spend(int aut)
         return;
     }
 
-    ASSERT(focused == active);
-    // Per-action upkeep for the acting player (durations, regen, clouds
-    // under them...). world_reacts() skips this during the monster phase.
     you.time_taken = aut;
+    you.turn_is_over = true;
+    party_action_done();
+}
+
+void party_action_done()
+{
+    ASSERT(party_active());
+    ASSERT(!in_monster_phase);
+    ASSERT(focused == active);
+    activate_pending_markers();
+
+    // The acting player's share of what world_reacts() normally does after
+    // an action. The world-level parts (monsters, clouds, level timers) run
+    // once per round in monster_phase() instead.
+    fire_final_effects();
+    if (!crawl_state.game_is_arena())
+    {
+        // As in world_reacts(): some callers (e.g. delays that only set
+        // time_taken) arrive here without it set, and god code asserts it.
+        you.turn_is_over = true;
+        religion_turn_end();
+        crawl_state.clear_god_acting();
+    }
+    check_banished();
     player_reacts();
-    spent[active] += aut;
+    if (you.num_turns != -1 && you.num_turns < INT_MAX)
+        you.num_turns++;
+
+    spent[active] += you.time_taken;
+
+    const int before = active;
     advance_turn();
+    if (active != before)
+        party_announce_turn();
+}
+
+string party_member_name(int idx)
+{
+    return make_stringf("Player %d", idx + 1);
+}
+
+void party_announce_turn()
+{
+    if (!party_active())
+        return;
+    mprf(MSGCH_PROMPT, "--- %s's turn (HP %d/%d) ---",
+         party_member_name(active).c_str(), you.hp, you.hp_max);
+    if (!crawl_state.test)
+    {
+        // Status panel, map centre and LOS all belong to the new player.
+        los_changed();
+        redraw_screen();
+    }
+}
+
+int party_member_at(const coord_def &pos)
+{
+    for (int i = 0; i < (int)slots.size(); ++i)
+        if (i != focused && slots[i]->pos() == pos && slots[i]->hp > 0)
+            return i;
+    return -1;
 }
 
 bool party_unfocused_player_at(const coord_def &pos)
 {
-    for (int i = 0; i < (int)slots.size(); ++i)
-        if (i != focused && slots[i]->pos() == pos && slots[i]->hp > 0)
-            return true;
-    return false;
+    return party_member_at(pos) >= 0;
 }
 
 void party_focus_for_monster(const monster &mons)
@@ -244,6 +308,93 @@ void party_restore_focus()
 bool party_in_monster_phase()
 {
     return in_monster_phase;
+}
+
+// A free spot near `centre` that `who` can stand on: no monster, no player.
+static bool _find_spot_near(const coord_def &centre, const player &who,
+                            coord_def &spot)
+{
+    for (distance_iterator di(centre, true, true, 8); di; ++di)
+    {
+        if (!in_bounds(*di) || actor_at(*di) || party_member_at(*di) >= 0)
+            continue;
+        if (!who.is_habitable(*di) || !cell_see_cell(centre, *di, LOS_NO_TRANS))
+            continue;
+        spot = *di;
+        return true;
+    }
+    return false;
+}
+
+void party_start(int size)
+{
+    ASSERT(!in_monster_phase);
+    size = min(size, PARTY_MAX_SIZE);
+    while (party_size() < size)
+    {
+        coord_def spot;
+        if (!_find_spot_near(you.pos(), you, spot))
+        {
+            mprf(MSGCH_ERROR, "No room for %s to join!",
+                 party_member_name(party_size()).c_str());
+            break;
+        }
+        party_add_player(spot);
+    }
+    if (party_active())
+    {
+        mprf(MSGCH_PROMPT, "A party of %d sets out. Players act in turn; "
+             "monsters move once everyone has.", party_size());
+        party_announce_turn();
+    }
+}
+
+void party_follow_to_current_level()
+{
+    if (!party_active())
+        return;
+    for (int i = 0; i < (int)slots.size(); ++i)
+    {
+        if (i == focused)
+            continue;
+        player &p = *slots[i];
+        // A player's level is stored on the player; bring them along.
+        p.where_are_you = you.where_are_you;
+        p.depth = you.depth;
+        p.on_current_level = true;
+        p.position.reset();     // so they don't block their own placement
+        coord_def spot;
+        if (_find_spot_near(you.pos(), p, spot))
+            p.position = spot;
+        else
+        {
+            // Fall back to anywhere passable; better than being in a wall.
+            for (rectangle_iterator ri(1); ri; ++ri)
+                if (!actor_at(*ri) && party_member_at(*ri) < 0
+                    && p.is_habitable(*ri))
+                {
+                    p.position = *ri;
+                    break;
+                }
+        }
+    }
+}
+
+bool party_swap_places_with_member_at(const coord_def &pos)
+{
+    const int idx = party_member_at(pos);
+    if (idx < 0)
+        return false;
+    player &other = *slots[idx];
+    if (!other.is_habitable(you.pos()))
+    {
+        mprf("%s can't stand where you are.",
+             party_member_name(idx).c_str());
+        return false;
+    }
+    other.position = you.pos();
+    mprf("You swap places with %s.", party_member_name(idx).c_str());
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +449,21 @@ LUAFN(party_lua_reset)
     return 0;
 }
 
+LUAFN(party_lua_where)
+{
+    const player &p = party_member(_lua_index(ls, 1));
+    PLUARET(string, level_id(p.where_are_you, p.depth).describe().c_str());
+}
+
+// What load_level() does for the party on arrival; lets tests check the
+// placement without real stairs (which need a save file).
+LUAFN(party_lua_follow)
+{
+    UNUSED(ls);
+    party_follow_to_current_level();
+    return 0;
+}
+
 LUAFN(party_lua_hp)
 {
     const player &p = party_member(_lua_index(ls, 1));
@@ -324,5 +490,7 @@ const struct luaL_Reg party_dlib[] =
 { "reset", party_lua_reset },
 { "hp", party_lua_hp },
 { "pos", party_lua_pos },
+{ "where", party_lua_where },
+{ "follow", party_lua_follow },
 { nullptr, nullptr }
 };

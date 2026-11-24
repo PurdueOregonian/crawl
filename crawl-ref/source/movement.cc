@@ -39,6 +39,7 @@
 #include "mon-place.h"
 #include "mon-util.h"
 #include "nearby-danger.h"
+#include "party.h"
 #include "player.h"
 #include "player-reacts.h"
 #include "prompt.h"
@@ -1179,6 +1180,13 @@ void move_player_action(coord_def move)
     // When confused, adjust movement randomly (and maybe abort early)
     if (you.confused() && !_adjust_confused_movement(move))
         return;
+
+    // Party members swap places, like allies do. If they can't, stay put.
+    if (party_member_at(you.pos() + move) >= 0
+        && !party_swap_places_with_member_at(you.pos() + move))
+    {
+        return;
+    }
 
     int num_steps = 1;
     // If this movement can rampage, check how many steps in total we want to move.

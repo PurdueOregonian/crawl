@@ -465,6 +465,16 @@ NORETURN static void _launch_game()
 
     _god_greeting_message(game_start);
 
+    // Hotseat party (multiplayer prototype). Party members aren't saved yet,
+    // so a reloaded game starts the party again from the loaded character.
+    if (Options.party_size > 1)
+    {
+        if (!game_start)
+            mprf(MSGCH_WARN, "Party members aren't saved yet; they rejoin as "
+                             "copies of you.");
+        party_start(Options.party_size);
+    }
+
     if (!crawl_state.game_is_tutorial())
         mpr("Press <w>?</w> for a list of commands and other information.");
 
@@ -1079,6 +1089,24 @@ static int _stun_delay()
     return min(stun_dur, BASELINE_DELAY);
 }
 
+// Wherever the main loop has finished one player action. Solo: the world
+// reacts as usual. In a party: the acting player's upkeep runs and the turn
+// passes on; the world reacts once everyone has acted (see party.cc).
+static void _player_action_done()
+{
+    if (party_active())
+        party_action_done();
+    else
+        world_reacts();
+}
+
+// Tests: run one iteration of the main input loop (reads queued keys, e.g.
+// from crawl.sendkeys()). Will block for real input if nothing is queued.
+void debug_run_input_once()
+{
+    _input();
+}
+
 //
 //  This function handles the player's input. It's called from main(),
 //  from inside an endless loop.
@@ -1141,7 +1169,7 @@ static void _input()
         {
             if (you.berserk())
                 _do_berserk_no_combat_penalty();
-            world_reacts();
+            _player_action_done();
             return;
         }
     }
@@ -1170,7 +1198,7 @@ static void _input()
         else
             you.time_taken = _stun_delay();
 
-        world_reacts();
+        _player_action_done();
         return;
     }
 
@@ -1183,7 +1211,7 @@ static void _input()
         autopickup();
         if (you.turn_is_over)
         {
-            world_reacts();
+            _player_action_done();
             return;
         }
     }
@@ -1212,7 +1240,7 @@ static void _input()
         {
             if (you.berserk())
                 _do_berserk_no_combat_penalty();
-            world_reacts();
+            _player_action_done();
         }
 
 #ifdef USE_TILE_WEB
@@ -1343,7 +1371,7 @@ static void _input()
 
         handle_channelled_spell();
 
-        world_reacts();
+        _player_action_done();
     }
     else
     {
@@ -2629,7 +2657,7 @@ void world_reacts()
 
     run_environment_effects();
 
-    // In a party, per-player upkeep runs per action (party_spend), not here.
+    // In a party, per-player upkeep runs per action (party_action_done).
     if (!crawl_state.game_is_arena() && !party_in_monster_phase())
         player_reacts();
 
@@ -2713,7 +2741,8 @@ void world_reacts()
 
     if (you.num_turns != -1)
     {
-        if (you.num_turns < INT_MAX)
+        // In a party the turn counter advances per player action instead.
+        if (you.num_turns < INT_MAX && !party_in_monster_phase())
             you.num_turns++;
 
         _update_place_stats();

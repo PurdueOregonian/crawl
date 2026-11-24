@@ -21,12 +21,41 @@
 
 #pragma once
 
+#include <string>
+
 #include "coord-def.h"
 
 class monster;
 class player;
 
 const int PARTY_ROUND_AUT = 10;
+const int PARTY_MAX_SIZE = 4;
+
+// Grow the party to `size` players (clones of the current player), placed
+// near them. Used at game start when the party_size option is > 1.
+void party_start(int size);
+
+// Called by the main loop wherever a solo game would call world_reacts()
+// after the player acts: does the acting player's per-action upkeep and
+// passes the turn on (running the monster phase when the round is over).
+// Uses you.time_taken.
+void party_action_done();
+
+// "--- Player 2's turn ---", plus a full redraw for the new player.
+void party_announce_turn();
+
+string party_member_name(int idx);
+
+// Index of a player other than the focused one standing at `pos`, or -1.
+int party_member_at(const coord_def &pos);
+
+// After `you` arrives on a new level, bring every other player along and
+// place them nearby. Covers stairs, shafts, portals and banishment alike.
+void party_follow_to_current_level();
+
+// The focused player is stepping onto `pos`. If a party member is there,
+// move them to the focused player's square and return true.
+bool party_swap_places_with_member_at(const coord_def &pos);
 
 // True when there is more than one player.
 bool party_active();
