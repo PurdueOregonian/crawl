@@ -15,6 +15,7 @@
 #include "files.h"
 #include "god-wrath.h"
 #include "los.h"
+#include "mapmark.h"
 #include "maps.h"
 #include "message.h"
 #include "mon-act.h"
@@ -406,6 +407,28 @@ LUAFN(debug_cpp_assert)
     return 0;
 }
 
+// Defined in main.cc; not exposed in a header.
+void world_reacts();
+
+// Simulate the player spending `aut` units of time (default 10, one normal
+// turn) and let the rest of the world react, exactly as the main loop does
+// after an action. Used by headless tests to advance game time.
+LUAFN(debug_pass_turn)
+{
+    const int aut = lua_isnone(ls, 1) ? 10 : luaL_safe_checkint(ls, 1);
+    if (aut < 0)
+        luaL_argerror(ls, 1, "time must be non-negative");
+    // A level made by debug.generate_level() hasn't been "entered", so its
+    // markers were never activated; the real game does this on arrival
+    // (see load_level in files.cc).
+    if (env.markers.need_activate())
+        env.markers.activate_all(false);
+    you.time_taken = aut;
+    you.turn_is_over = true;
+    world_reacts();
+    return 0;
+}
+
 LUAFN(debug_reset_rng)
 {
     // call this with care...
@@ -504,6 +527,7 @@ const struct luaL_Reg debug_dlib[] =
 { "seen_monsters_react", debug_seen_monsters_react },
 { "disable", debug_disable },
 { "cpp_assert", debug_cpp_assert },
+{ "pass_turn", debug_pass_turn },
 { "reset_rng", debug_reset_rng },
 { "get_rng_state", debug_get_rng_state },
 { "check_moncasts", debug_check_moncasts },

@@ -102,6 +102,18 @@ MDEF(y)
     PLUARET(integer, int(mons->pos().y) - int(you.pos().y));
 }
 
+// Absolute map coordinates; x/y above are relative to the player in `you`,
+// which changes between players in a party.
+MDEF(abs_x)
+{
+    PLUARET(integer, int(mons->pos().x));
+}
+
+MDEF(abs_y)
+{
+    PLUARET(integer, int(mons->pos().y));
+}
+
 MDEF(hp)
 {
     PLUARET(integer, int(mons->hit_points));
@@ -537,6 +549,8 @@ static MonsAccessor mons_attrs[] =
 
     { "x"   , l_mons_x    },
     { "y"   , l_mons_y    },
+    { "abs_x", l_mons_abs_x },
+    { "abs_y", l_mons_abs_y },
     { "hd"  , l_mons_hd   },
     { "beh" , l_mons_beh  },
     { "muse", l_mons_muse },

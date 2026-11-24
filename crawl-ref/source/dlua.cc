@@ -316,6 +316,10 @@ void init_dungeon_lua()
     luaL_setfuncs(dlua, los_dlib, 0);
     lua_setglobal(dlua, "los");
 
+    lua_newtable(dlua);
+    luaL_setfuncs(dlua, party_dlib, 0);
+    lua_setglobal(dlua, "party");
+
     dlua.execfile("dlua/dungeon.lua", true, true);
     dlua.execfile("dlua/luamark.lua", true, true);
     dlua.execfile("dlua/mapinit.lua", true, true);

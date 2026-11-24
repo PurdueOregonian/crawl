@@ -7,6 +7,8 @@
 
 #include "mon-act.h"
 
+#include "party.h"
+
 #include "act-iter.h"
 #include "areas.h"
 #include "arena.h"
@@ -2867,6 +2869,8 @@ void handle_monsters(bool with_noise)
         // the queue just after this.
         if (oldspeed == mon->speed_increment)
         {
+            // In a party, swap in the player this monster is after.
+            party_focus_for_monster(*mon);
             handle_monster_move(mon);
             _post_monster_move(mon);
             fire_final_effects();
@@ -2886,6 +2890,9 @@ void handle_monsters(bool with_noise)
             break;
         }
     }
+
+    // Hand `you` back to the player whose turn it is.
+    party_restore_focus();
 
     // Process noises now (before clearing the sleep flag).
     if (with_noise)
@@ -3295,6 +3302,10 @@ bool mon_can_move_to_pos(const monster* mons, const coord_def& delta,
 
     // Bounds check: don't consider moving out of grid!
     if (!in_bounds(targ))
+        return false;
+
+    // Other party members occupy their squares even when not in `you`.
+    if (party_unfocused_player_at(targ))
         return false;
 
     // Non-friendly and non-good neutral monsters won't enter

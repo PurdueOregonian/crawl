@@ -43,6 +43,7 @@ void cluaopen_globals(lua_State *ls);
  */
 
 extern const struct luaL_Reg debug_dlib[];
+extern const struct luaL_Reg party_dlib[];
 extern const struct luaL_Reg dgn_dlib[];
 extern const struct luaL_Reg dgn_build_dlib[];
 extern const struct luaL_Reg dgn_event_dlib[];

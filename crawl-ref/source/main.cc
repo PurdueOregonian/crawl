@@ -108,6 +108,7 @@
 #include "output.h"
 #include "player.h"
 #include "player-notices.h"
+#include "party.h"
 #include "player-reacts.h"
 #include "prompt.h"
 #include "quiver.h"
@@ -2628,7 +2629,8 @@ void world_reacts()
 
     run_environment_effects();
 
-    if (!crawl_state.game_is_arena())
+    // In a party, per-player upkeep runs per action (party_spend), not here.
+    if (!crawl_state.game_is_arena() && !party_in_monster_phase())
         player_reacts();
 
     if (player_in_branch(BRANCH_ABYSS))

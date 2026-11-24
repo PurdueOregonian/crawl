@@ -735,6 +735,9 @@
     <ClCompile Include="..\l-debug.cc">
       <Filter>cc</Filter>
     </ClCompile>
+    <ClCompile Include="..\party.cc">
+      <Filter>cc</Filter>
+    </ClCompile>
     <ClCompile Include="..\l-colour.cc">
       <Filter>cc</Filter>
     </ClCompile>

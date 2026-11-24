@@ -397,6 +397,7 @@ python.exe util/gen-all.py</Command>
     <ClCompile Include="..\l-colour.cc" />
     <ClCompile Include="..\l-crawl.cc" />
     <ClCompile Include="..\l-debug.cc" />
+    <ClCompile Include="..\party.cc" />
     <ClCompile Include="..\l-dgn.cc" />
     <ClCompile Include="..\l-dgnbld.cc" />
     <ClCompile Include="..\l-dgnevt.cc" />
