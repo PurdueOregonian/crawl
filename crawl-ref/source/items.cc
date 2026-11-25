@@ -1838,12 +1838,17 @@ static void _get_book(item_def& it)
         {
             mprf("%s burns to shimmering ash in your grasp.",
                  it.name(DESC_THE).c_str());
+            // In a party, the others still get to read it first.
+            party_share_book(spells_in_book(it));
             return;
         }
         mprf("You pick up %s and begin reading...", it.name(DESC_A).c_str());
 
         if (!library_add_spells(spells_in_book(it)))
             mpr("Unfortunately, you learned nothing new or useful.");
+
+        // In a party, a book or parchment teaches everyone who can learn.
+        party_share_book(spells_in_book(it));
 
         taken_new_item(it.base_type);
 

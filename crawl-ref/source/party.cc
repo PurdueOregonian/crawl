@@ -36,6 +36,8 @@
 #include "religion.h"
 #include "shopping.h"
 #include "skills.h"
+#include "spl-util.h"
+#include "options.h"
 #include "state.h"
 #include "stringutil.h"
 #include "terrain.h"
@@ -467,6 +469,45 @@ void party_share_manual(skill_type sk, int points)
         p.skill_manual_points[sk] += points;
         mprf("%s studies it too.", party_member_name(i).c_str());
     }
+}
+
+void party_share_book(const vector<spell_type> &spells)
+{
+    for (int i = 0; i < (int)slots.size(); ++i)
+    {
+        if (i == focused || slots[i]->hp <= 0)
+            continue;
+        player &p = *slots[i];
+        // Djinn and other innate casters have no library to add to.
+        // Read the array directly: player::has_mutation() and friends look at
+        // the global `you`, not at the player they're called on.
+        if (p.mutation[MUT_INNATE_CASTER] > 0)
+            continue;
+
+        vector<string> learned;
+        for (spell_type st : spells)
+        {
+            if (st == SPELL_NO_SPELL || p.spell_library[st])
+                continue;
+            p.spell_library.set(st, true);
+            if (Options.auto_hide_spells)
+                p.hidden_spells.set(st, true);
+            learned.push_back(spell_title(st));
+        }
+        // (Unlike library_add_spells() for the reader, this skips the
+        // shopping-list update: that list belongs to the player in `you`.)
+        if (!learned.empty())
+        {
+            mprf("%s adds %s to their library too.",
+                 party_member_name(i).c_str(),
+                 comma_separated_line(learned.begin(), learned.end()).c_str());
+        }
+    }
+}
+
+bool party_knows_spell(int idx, spell_type spell)
+{
+    return party_member(idx).spell_library[spell];
 }
 
 // Skill-manual points left for player `idx` in skill `sk` (tests).
@@ -953,6 +994,16 @@ LUAFN(party_lua_explore_leader)
     PLUARET(integer, party_explore_leader() + 1);
 }
 
+// party.knows_spell(i, spell_name): is it in player i's library?
+LUAFN(party_lua_knows_spell)
+{
+    const int idx = _lua_index(ls, 1);
+    const spell_type sp = spell_by_name(luaL_checkstring(ls, 2), true);
+    if (sp == SPELL_NO_SPELL)
+        luaL_argerror(ls, 2, "unknown spell");
+    PLUARET(boolean, party_knows_spell(idx, sp));
+}
+
 // party.manual_points(i, skill_name): manual points player i has left.
 LUAFN(party_lua_manual_points)
 {
@@ -1001,6 +1052,7 @@ const struct luaL_Reg party_dlib[] =
 { "pos", party_lua_pos },
 { "where", party_lua_where },
 { "manual_points", party_lua_manual_points },
+{ "knows_spell", party_lua_knows_spell },
 { "follow", party_lua_follow },
 { "explore_leader", party_lua_explore_leader },
 { "rest_leader", party_lua_rest_leader },

@@ -72,6 +72,14 @@ dgn.grid(sx, sy, "floor")
 --    load_level() runs on arrival. Real stairs are covered by playtesting.)
 debug.goto_place("D:2")
 debug.generate_level()
+-- generate_level() leaves player 1 at their old coordinates, which on the new
+-- layout may be solid rock (a real arrival puts you on the stairs). Give them
+-- some floor to arrive on, as a staircase would.
+do
+  local ax, ay = you.pos()
+  dgn.fill_grd_area(ax - 2, ay - 2, ax + 2, ay + 2, "floor")
+  debug.los_changed()
+end
 party.follow()
 assert(party.where(1) == "D:2", "player 1 is on " .. party.where(1))
 assert(party.where(p2) == "D:2", "player 2 was left on " .. party.where(p2))

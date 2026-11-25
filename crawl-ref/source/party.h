@@ -25,6 +25,9 @@
 
 #include "coord-def.h"
 #include "skill-type.h"
+#include "spell-type.h"
+
+#include <vector>
 
 class monster;
 class player;
@@ -90,6 +93,11 @@ string party_member_name(int idx);
 // A skill manual picked up by the player in `you` teaches every other living
 // party member who can still learn that skill, as if they'd picked it up too.
 void party_share_manual(skill_type sk, int points);
+
+// A spellbook/parchment picked up by the player in `you`: every other living
+// party member who has a spell library (not innate casters such as djinn)
+// adds its spells to theirs.
+void party_share_book(const vector<spell_type> &spells);
 
 // Name of a living party member who isn't next to the player in `you`, or ""
 // if everyone is. Taking stairs needs the whole party adjacent.
