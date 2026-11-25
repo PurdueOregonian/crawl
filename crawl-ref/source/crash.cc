@@ -96,6 +96,16 @@ template <typename TO, typename FROM> TO nasty_cast(FROM f)
 ////////////////////////////////////////////////////////////////////////////
 static int _crash_signal    = 0;
 static int _recursion_depth = 0;
+
+#ifdef TARGET_OS_WINDOWS
+// Windows: hard crashes (access violations etc.) are structured exceptions,
+// not signals, so the signal handlers below never see them. An unhandled
+// exception filter routes them into crash_signal_handler(). Defined at the
+// end of this file, away from <windows.h>'s macros.
+static void _install_windows_crash_filter();
+// "Access violation at foo() (file.cc:123)", filled in by the filter.
+static string _windows_crash_where;
+#endif
 static mutex_t crash_mutex;
 
 // Make this non-static so stack traces are easier to follow
@@ -267,6 +277,10 @@ void init_crash_handler()
     }
 
 #endif // if defined(USE_UNIX_SIGNALS)
+
+#ifdef TARGET_OS_WINDOWS
+    _install_windows_crash_filter();
+#endif
 }
 
 string crash_signal_info()
@@ -287,6 +301,8 @@ string crash_signal_info()
     if (name == nullptr)
         name = "INVALID";
     return make_stringf("Crash caused by signal #%d: %s", _crash_signal, name);
+#elif defined(TARGET_OS_WINDOWS)
+    return _windows_crash_where;
 #else
     return "";
 #endif
@@ -379,14 +395,14 @@ void write_stack_trace(FILE* file)
 
     free(symbols);
 }
-#else // BACKTRACE_SUPPORTED
+#elif !defined(TARGET_OS_WINDOWS) // BACKTRACE_SUPPORTED
 void write_stack_trace(FILE* file)
 {
     const char* msg = "Unable to get stack trace on this platform.\n";
     fprintf(stderr, "%s", msg);
     fprintf(file, "%s", msg);
 }
-#endif
+#endif // (Windows: write_stack_trace() is at the end of this file.)
 
 void call_gdb(FILE *file)
 {
@@ -462,3 +478,112 @@ void watchdog()
     alarm(60);
 #endif
 }
+
+#ifdef TARGET_OS_WINDOWS
+/////////////////////////////////////////////////////////////////////////////
+// Windows crash handling: symbolised stack traces (dbghelp + the build's PDB)
+// and an unhandled exception filter for hard crashes. Kept at the end of the
+// file so <windows.h>'s macros can't interfere with the code above.
+/////////////////////////////////////////////////////////////////////////////
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
+
+// windows.h may already have been included (via other headers) with this
+// excluded, so declare it directly. It's exported by kernel32/ntdll.
+extern "C" USHORT WINAPI RtlCaptureStackBackTrace(ULONG skip, ULONG count,
+                                                 PVOID *frames, PULONG hash);
+
+// "function (file.cc:123)" for a code address, as far as symbols allow.
+static string _windows_symbolise(DWORD64 addr)
+{
+    HANDLE proc = GetCurrentProcess();
+    char buf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+    SYMBOL_INFO *sym = reinterpret_cast<SYMBOL_INFO*>(buf);
+    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+    sym->MaxNameLen = MAX_SYM_NAME;
+
+    string out;
+    DWORD64 disp = 0;
+    if (SymFromAddr(proc, addr, &disp, sym))
+        out = sym->Name;
+    else
+        out = make_stringf("0x%llx", (unsigned long long)addr);
+
+    IMAGEHLP_LINE64 line;
+    line.SizeOfStruct = sizeof(line);
+    DWORD ldisp = 0;
+    if (SymGetLineFromAddr64(proc, addr, &ldisp, &line))
+    {
+        const char *file = strrchr(line.FileName, 0x5C);   // backslash
+        out += make_stringf(" (%s:%lu)", file ? file + 1 : line.FileName,
+                            (unsigned long)line.LineNumber);
+    }
+    return out;
+}
+
+static bool _windows_syms_ready()
+{
+    static bool tried = false, ok = false;
+    if (!tried)
+    {
+        tried = true;
+        SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+        ok = SymInitialize(GetCurrentProcess(), nullptr, TRUE);
+    }
+    return ok;
+}
+
+void write_stack_trace(FILE* file)
+{
+    void *frames[62];
+    const USHORT n = RtlCaptureStackBackTrace(0, ARRAYSZ(frames), frames, nullptr);
+    if (!_windows_syms_ready())
+    {
+        fprintf(file, "Obtained %u stack frames (no symbols).\n", n);
+        for (USHORT i = 0; i < n; i++)
+            fprintf(file, "  %p\n", frames[i]);
+        return;
+    }
+    fprintf(file, "Obtained %u stack frames.\n", n);
+    for (USHORT i = 0; i < n; i++)
+    {
+        fprintf(file, "  %s\n",
+                _windows_symbolise(reinterpret_cast<DWORD64>(frames[i])).c_str());
+    }
+}
+
+static LONG WINAPI _windows_crash_filter(EXCEPTION_POINTERS *info)
+{
+    const DWORD code = info->ExceptionRecord->ExceptionCode;
+    const DWORD64 where =
+        reinterpret_cast<DWORD64>(info->ExceptionRecord->ExceptionAddress);
+    const char *what = code == EXCEPTION_ACCESS_VIOLATION   ? "Access violation"
+                     : code == EXCEPTION_STACK_OVERFLOW     ? "Stack overflow"
+                     : code == EXCEPTION_INT_DIVIDE_BY_ZERO ? "Division by zero"
+                                                            : "Exception";
+    _windows_crash_where = make_stringf("%s (0x%08lX)", what, (unsigned long)code);
+    if (_windows_syms_ready())
+        _windows_crash_where += " at " + _windows_symbolise(where);
+    if (code == EXCEPTION_ACCESS_VIOLATION
+        && info->ExceptionRecord->NumberParameters >= 2)
+    {
+        _windows_crash_where += make_stringf(" (%s address 0x%llx)",
+            info->ExceptionRecord->ExceptionInformation[0] ? "writing" : "reading",
+            (unsigned long long)info->ExceptionRecord->ExceptionInformation[1]);
+    }
+    fprintf(stderr, "%s\n", _windows_crash_where.c_str());
+
+    // The usual crash report (crash-*.txt with stack trace, messages...).
+    // It raises SIGSEGV at the end, which terminates the process.
+    crash_signal_handler(SIGSEGV);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static void _install_windows_crash_filter()
+{
+    SetUnhandledExceptionFilter(_windows_crash_filter);
+}
+#endif // TARGET_OS_WINDOWS

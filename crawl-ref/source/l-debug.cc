@@ -441,6 +441,16 @@ LUAFN(debug_pass_turn)
     return 0;
 }
 
+// Deliberately crash with an access violation, to test that hard crashes
+// produce a crash report (see the Windows crash filter in crash.cc).
+LUAFN(debug_segfault)
+{
+    UNUSED(ls);
+    volatile int *volatile nowhere = nullptr;
+    *nowhere = 1;
+    return 0;
+}
+
 LUAFN(debug_reset_rng)
 {
     // call this with care...
@@ -540,6 +550,7 @@ const struct luaL_Reg debug_dlib[] =
 { "disable", debug_disable },
 { "cpp_assert", debug_cpp_assert },
 { "pass_turn", debug_pass_turn },
+{ "segfault", debug_segfault },
 { "input_once", debug_input_once },
 { "reset_rng", debug_reset_rng },
 { "get_rng_state", debug_get_rng_state },
