@@ -63,6 +63,7 @@
 #include "movement.h"
 #include "notes.h"
 #include "ouch.h"
+#include "party.h"
 #include "player-notices.h"
 #include "religion.h"
 #include "spl-book.h"
@@ -2606,6 +2607,10 @@ void monster::set_hit_dice(int new_hit_dice)
 
 void monster::set_position(const coord_def &c)
 {
+    // Monsters never end up inside a party member either.
+    if (c != pos())
+        party_make_room_at(c);
+
     if (mons_is_projectile(*this))
     {
         // Assume some means of displacement, normal moves will overwrite this.

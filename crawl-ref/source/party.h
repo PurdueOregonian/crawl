@@ -148,6 +148,15 @@ int party_member_at(const coord_def &pos);
 // place them nearby. Covers stairs, shafts, portals and banishment alike.
 void party_follow_to_current_level();
 
+// Something (the player in `you`, or a monster) is about to be put at `pos`.
+// If another party member is standing there, move them to the nearest free
+// square, so nothing ever ends up inside a teammate (blinks, teleports,
+// summons...). Party members are like permanent allies in this respect.
+void party_make_room_at(const coord_def &pos);
+
+// Move party member `idx` (not the one in `you`) directly to `pos` (tests).
+void party_member_set_pos(int idx, const coord_def &pos);
+
 // The focused player is stepping onto `pos`. If a party member is there,
 // move them to the focused player's square and return true.
 bool party_swap_places_with_member_at(const coord_def &pos);

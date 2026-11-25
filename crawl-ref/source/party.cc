@@ -62,6 +62,7 @@ void world_reacts();
 
 static bool _find_spot_near(const coord_def &centre, const player &who,
                             coord_def &spot);
+static bool _here(const player &p);
 
 namespace
 {
@@ -335,8 +336,11 @@ tileidx_t party_doll_tile(int idx)
 int party_corpse_at(const coord_def &pos)
 {
     for (int i = 0; i < (int)slots.size(); ++i)
-        if (i != focused && slots[i]->pending_revival && slots[i]->pos() == pos)
+        if (i != focused && slots[i]->pending_revival && slots[i]->pos() == pos
+            && _here(*slots[i]))
+        {
             return i;
+        }
     return -1;
 }
 
@@ -743,11 +747,22 @@ static bool _taking_stairs(const player &p)
     return false;
 }
 
+// Is party member `p` (not the one in `you`) on the level `you` is on?
+// Briefly not, during a level change: `you` arrives before the others are
+// brought along, and until then their coordinates belong to the old level.
+static bool _here(const player &p)
+{
+    return p.where_are_you == you.where_are_you && p.depth == you.depth;
+}
+
 int party_member_at(const coord_def &pos)
 {
     for (int i = 0; i < (int)slots.size(); ++i)
-        if (i != focused && slots[i]->pos() == pos && slots[i]->hp > 0)
+        if (i != focused && slots[i]->pos() == pos && slots[i]->hp > 0
+            && _here(*slots[i]))
+        {
             return i;
+        }
     return -1;
 }
 
@@ -960,6 +975,31 @@ void party_follow_to_current_level()
                 }
         }
     }
+}
+
+void party_member_set_pos(int idx, const coord_def &pos)
+{
+    ASSERT(idx != focused);
+    slots[idx]->position = pos;
+}
+
+void party_make_room_at(const coord_def &pos)
+{
+    if (!party_active() || !in_bounds(pos))
+        return;
+    const int idx = party_member_at(pos);
+    if (idx < 0)
+        return;
+    player &p = *slots[idx];
+    p.position.reset();                 // don't block our own search
+    coord_def spot;
+    if (_find_spot_near(pos, p, spot))
+    {
+        p.position = spot;
+        mprf("%s is pushed aside.", party_member_name(idx).c_str());
+    }
+    else
+        p.position = pos;               // nowhere to go; leave them be
 }
 
 bool party_swap_places_with_member_at(const coord_def &pos)
@@ -1291,6 +1331,18 @@ LUAFN(party_lua_form)
                     : transform_name(p.form));
 }
 
+// party.set_pos(i, x, y): put player i (not the one in `you`) somewhere,
+// for tests. Direct, like other party placement: no movement effects.
+LUAFN(party_lua_set_pos)
+{
+    const int idx = _lua_index(ls, 1);
+    const coord_def pos(luaL_safe_checkint(ls, 2), luaL_safe_checkint(ls, 3));
+    if (idx == party_focused_index() || !in_bounds(pos))
+        luaL_argerror(ls, 1, "can only place a player who isn't in `you`");
+    party_member_set_pos(idx, pos);
+    return 0;
+}
+
 // party.fallen(i): is player i down, waiting to be revived?
 LUAFN(party_lua_fallen)
 {
@@ -1337,6 +1389,7 @@ const struct luaL_Reg party_dlib[] =
 { "add_character", party_lua_add_character },
 { "species", party_lua_species },
 { "fallen", party_lua_fallen },
+{ "set_pos", party_lua_set_pos },
 { "form", party_lua_form },
 { "revive_progress", party_lua_revive_progress },
 { "spend", party_lua_spend },

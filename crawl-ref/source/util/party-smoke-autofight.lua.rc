@@ -1,0 +1,51 @@
+<
+-- Autofight (Tab) must not swap with a teammate in a hallway (which drags
+-- them backwards). Corridor: player 1, then player 2, then a goblin. Player
+-- 1 presses Tab: expect "No reachable target" and nobody moved.
+local step = 0
+local passes = 0
+local finished = false
+local x0, y0
+local function d(code) return crawl.call_dlua(code) end
+local function log(s) crawl.stderr("SMOKE " .. s .. "\n") end
+local function finish(msg) log(msg); log("DONE"); finished = true end
+local function pos(i)
+  return d(string.format("local x, y = party.pos(%d); return x * 1000 + y", i))
+end
+
+function ready()
+  if finished then return end
+  passes = passes + 1
+  if passes > 20 then finish("FAIL gave up at step " .. step); return end
+  if d("return party.active()") ~= 1 then crawl.sendkeys("s"); return end
+
+  if step == 0 then
+    -- A one-wide corridor through rock: P1 | P2 | . . . | goblin
+    d([[dgn.dismiss_monsters()
+        local x, y = you.pos()
+        dgn.fill_grd_area(x - 3, y - 3, x + 10, y + 3, "rock_wall")
+        dgn.fill_grd_area(x, y, x + 8, y, "floor")
+        party.set_pos(2, x + 1, y)
+        dgn.create_monster(x + 6, y, "goblin")
+        debug.los_changed()]])
+    -- Let a turn pass so the goblin is seen before trying to fight it.
+    step = 1
+    crawl.sendkeys("s")
+  elseif step == 1 then
+    x0, y0 = pos(1), pos(2)
+    step = 2
+    crawl.sendkeys(string.char(9))          -- Tab: autofight
+  elseif step == 2 then
+    local msgs = crawl.messages(4)
+    local p1, p2 = pos(1), pos(2)
+    if p1 ~= x0 or p2 ~= y0 then
+      finish(string.format("FAIL autofight moved the party (p1 %d->%d, p2 %d->%d): %s",
+                           x0, p1, y0, p2, msgs))
+    elseif not msgs:find("No reachable target") then
+      finish("FAIL expected 'No reachable target', got: " .. msgs)
+    else
+      finish("PASS autofight won't push past a teammate: No reachable target")
+    end
+  end
+end
+>

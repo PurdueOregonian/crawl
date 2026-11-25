@@ -5,6 +5,7 @@
 
 #include "AppHdr.h"
 
+#include "party.h"
 #include "player.h"
 
 #include <cmath>
@@ -94,6 +95,8 @@ void player::set_position(const coord_def &c)
 
     const coord_def old_pos = pos();
     const bool real_move = (c != old_pos);
+    if (real_move)
+        party_make_room_at(c);   // never land inside a party member
     actor::set_position(c);
 
     if (real_move)

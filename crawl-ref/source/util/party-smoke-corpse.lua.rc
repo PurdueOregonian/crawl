@@ -1,0 +1,68 @@
+<
+-- A monster standing on a fallen player's body must still be drawn (it used
+-- to be hidden under the body). Player 1 is put on 1 hp next to a goblin,
+-- which kills them; then a goblin is placed on the body. The runner prints
+-- the final screen: the body's square should show the goblin ('g'), and
+-- the log says where to look.
+local step = 0
+local passes = 0
+local finished = false
+local bx, by
+local waited
+local function d(code) return crawl.call_dlua(code) end
+local function log(s) crawl.stderr("SMOKE " .. s .. "\n") end
+local function finish(msg) log(msg); log("DONE"); finished = true end
+
+function ready()
+  if finished then return end
+  passes = passes + 1
+  if passes > 80 then finish("FAIL gave up at step " .. step); return end
+  local active = d("return party.active()")
+
+  if step == 0 then
+    if active ~= 1 then crawl.sendkeys("s"); return end
+    -- Player 1 on 1 hp, a goblin next to them.
+    d([[dgn.dismiss_monsters()
+        party.set_hp(1, 1)
+        local x1, y1 = party.pos(1)
+        local x2, y2 = party.pos(2)
+        for _, dd in ipairs({{-1,0},{1,0},{0,-1},{0,1},{-1,-1},{1,1},{-1,1},{1,-1}}) do
+          local x, y = x1 + dd[1], y1 + dd[2]
+          if dgn.is_passable(x, y) and not (x == x2 and y == y2)
+             and not dgn.mons_at(x, y) then
+            dgn.create_monster(x, y, "generate_awake goblin")
+            return
+          end
+        end]])
+    step = 1
+    crawl.sendkeys("s")
+  elseif step == 1 then
+    waited = (waited or 0) + 1
+    -- The goblin may take a while to land the hit (misses, regeneration);
+    -- after 10 tries, finish player 1 off directly on their own turn.
+    if waited > 10 and active == 1 and not d("return party.fallen(1)") then
+      log("goblin hasn't killed player 1 yet; killing them directly")
+      d("you.die()")
+    end
+    if d("return party.fallen(1)") then
+      bx = d("local x, y = party.pos(1); return x")
+      by = d("local x, y = party.pos(1); return y")
+      log(string.format("P1 fell at (%d,%d)", bx, by))
+      -- Put a goblin right on the body.
+      d(string.format([[dgn.dismiss_monsters()
+          dgn.create_monster(%d, %d, "generate_awake goblin att:friendly")]], bx, by))
+      step = 2
+    end
+    crawl.sendkeys("s")
+  elseif step == 2 then
+    local m = d(string.format([[local m = dgn.mons_at(%d, %d)
+                                return m and m.name or "nothing"]], bx, by))
+    log("monster on the body: " .. tostring(m))
+    if m == "nothing" then finish("FAIL no monster ended up on the body"); return end
+    -- The drawing itself can only be seen: the final screen the runner
+    -- prints should show 'g' on the body's square, not '%'.
+    finish(string.format("PASS %s on the fallen player's body at (%d,%d); "
+                         .. "final screen should show 'g' there", m, bx, by))
+  end
+end
+>

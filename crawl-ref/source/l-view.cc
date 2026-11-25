@@ -16,6 +16,7 @@
 #include "losglobal.h"
 #include "map-knowledge.h"
 #include "mon-death.h"
+#include "party.h"
 #include "player.h"
 #include "player-notices.h"
 #include "religion.h"
@@ -105,6 +106,13 @@ LUAFN(view_is_safe_square)
 {
     PLAYERCOORDS(p, 1, 2)
     if (!map_bounds(p))
+    {
+        PLUARET(boolean, false);
+        return 1;
+    }
+    // A party member is there: scripted movement (autofight etc.) must not
+    // walk into them, which would swap places and drag them backwards.
+    if (party_member_at(p) >= 0)
     {
         PLUARET(boolean, false);
         return 1;

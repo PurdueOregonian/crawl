@@ -955,7 +955,10 @@ void draw_cell(screen_cell_t *cell, const coord_def &gc,
     {
         _draw_party_member(cell, gc, party_member_at(gc));
     }
+    // A fallen player's body, unless something is standing on it: monsters
+    // can walk over bodies, and drawing the body would hide them.
     else if (you.see_cell(gc) && party_corpse_at(gc) >= 0
+             && !env.map_knowledge(gc).monsterinfo()
              && _layers & Layer::PLAYER)
     {
         _draw_party_member(cell, gc, party_corpse_at(gc));

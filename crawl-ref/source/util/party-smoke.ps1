@@ -9,6 +9,10 @@
 #             then an enemy near the inactive player must block resting
 #             without crashing.
 #   talisman - player 1 transforms with a talisman; player 2 must not.
+#   autofight - Tab in a hallway with a teammate in front: no swap, just
+#             "No reachable target".
+#   corpse  - a goblin kills player 1; a monster on the body must still be
+#             drawn (check the final screen).
 #   characters - player 2 picks their own character from the new-game menus
 #             (the runner types the keys from the scenario's MENU-KEYS line).
 #
@@ -16,7 +20,7 @@
 # so this is the check for level changes.
 #
 # Usage (from crawl-ref/source):
-#   pwsh util/party-smoke.ps1 [-Scenario stairs|explore|rest|characters|talisman|all] [-TimeoutSec 60]
+#   pwsh util/party-smoke.ps1 [-Scenario stairs|explore|rest|characters|talisman|autofight|corpse|all] [-TimeoutSec 60]
 # Exit code: 0 = PASS, 1 = FAIL, 2 = crash/timeout. Prints the script's log
 # and the final screen (read with util/peek-console.ps1).
 
@@ -24,7 +28,7 @@ param([string]$Scenario = "all", [int]$TimeoutSec = 60)
 
 if ($Scenario -eq "all") {
     $worst = 0
-    foreach ($s in "stairs", "explore", "rest", "characters", "talisman") {
+    foreach ($s in "stairs", "explore", "rest", "characters", "talisman", "autofight", "corpse") {
         "##### scenario: $s"
         & pwsh -NoProfile -File $PSCommandPath -Scenario $s -TimeoutSec $TimeoutSec
         $worst = [Math]::Max($worst, $LASTEXITCODE)

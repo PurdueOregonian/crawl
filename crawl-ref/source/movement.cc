@@ -592,6 +592,11 @@ monster* get_rampage_target(coord_def move)
         if (!you.see_cell_no_trans(p))
             return nullptr;
 
+        // A party member in the way: no rampage (it would carry you through
+        // or onto them). A plain step into them still swaps places.
+        if (party_member_at(p) >= 0)
+            return nullptr;
+
         monster* mon = monster_at(p);
         if (!mon
             || fedhas_passthrough(mon)
@@ -766,6 +771,10 @@ static void _do_east_wind(int num_steps)
 
 static bool _cannot_step_into(const coord_def& pos)
 {
+    // Party members block multi-step moves (stampede, tailwind...); walking
+    // into one on purpose swaps places before we get here.
+    if (party_member_at(pos) >= 0)
+        return true;
     return !you.can_pass_through(pos)
             && (!you.digging
                 || !in_bounds(pos)
