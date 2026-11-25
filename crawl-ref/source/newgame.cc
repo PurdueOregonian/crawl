@@ -1056,6 +1056,42 @@ bool choose_game(newgame_def& ng, newgame_def& choice,
     return false;
 }
 
+// Multiplayer party: the character menus (species, background, weapon) for
+// an extra player joining a game that has already started. Unlike
+// choose_game(), there's no game type/seed choice, no name prompt (party
+// members go by `name`, e.g. "Player 2"), no rc defaults, and nothing is
+// written to the new-game options file (that remembers player 1's choice).
+// Returns false if the player backed out (Esc), in which case `ng` is unset.
+bool choose_party_member(newgame_def& ng, const string &name)
+{
+    newgame_def choice;
+    // Tutorial/hints have their own character pickers; use the normal menus.
+    choice.type = (crawl_state.type == GAME_TYPE_TUTORIAL
+                   || crawl_state.type == GAME_TYPE_HINTS)
+                  ? GAME_TYPE_NORMAL : crawl_state.type;
+    choice.name = name;
+    ng.type = choice.type;
+    ng.name = name;
+    const newgame_def defaults;
+
+    clrscr();
+    try
+    {
+        _choose_char(ng, choice, defaults);
+    }
+    catch (const game_ended_condition &e)
+    {
+        // Esc in these menus normally abandons the new game; here that would
+        // end everyone's game, so it just means "no new character".
+        if (e.exit_reason != game_exit::abort)
+            throw;
+        return false;
+    }
+    ng.name = name;
+    ng.type = choice.type;
+    return true;
+}
+
 // Don't reselect the same weapon for a possibly-different character.
 void forget_weapon_if_random(newgame_def& ng_choice)
 {

@@ -56,6 +56,7 @@
 #include "notes.h"
 #include "options.h"
 #include "output.h"
+#include "party.h"
 #include "player.h"
 #include "player-stats.h"
 #include "potion.h"
@@ -1621,6 +1622,11 @@ void player_die(kill_method_type death_type, mid_t source, int dam,
         return;
     }
 #endif
+
+    // Multiplayer party: while anyone else is still standing, you fall (and
+    // can be revived) instead of the game ending.
+    if (_is_real_death(death_type) && party_member_falls())
+        return;
 
     crawl_state.cancel_cmd_all();
 

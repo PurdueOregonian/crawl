@@ -475,7 +475,10 @@ NORETURN static void _launch_game()
         if (!game_start)
             mprf(MSGCH_WARN, "Party members aren't saved yet; they rejoin as "
                              "copies of you.");
-        party_start(Options.party_size);
+        // New game: each extra player picks their own character, unless
+        // party_choose_characters = false (then they're copies of you).
+        party_start(Options.party_size,
+                    game_start && Options.party_choose_characters);
     }
 
     if (!crawl_state.game_is_tutorial())
@@ -2346,6 +2349,7 @@ void process_command(command_type cmd, command_type prev_cmd)
         // else fall-through
     case CMD_WAIT:
         update_acrobat_status();
+        party_note_idle_action();   // counts towards reviving a fallen teammate
         you.turn_is_over = true;
         break;
 

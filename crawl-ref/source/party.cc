@@ -19,6 +19,7 @@
 #include "delay.h"
 #include "env.h"
 #include "fineff.h"
+#include "initfile.h"
 #include "l-libs.h"
 #include "level-id.h"
 #include "los.h"
@@ -26,6 +27,12 @@
 #include "mapmark.h"
 #include "message.h"
 #include "monster.h"
+#include "newgame.h"
+#include "newgame-def.h"
+#include "ng-setup.h"
+#include "species.h"
+#include "jobs.h"
+#include "item-prop.h"
 #include "movement.h"
 #include "nearby-danger.h"
 #include "unwind.h"
@@ -41,11 +48,20 @@
 #include "state.h"
 #include "stringutil.h"
 #include "terrain.h"
+#include "transform.h"
 #include "travel.h"
 #include "viewgeom.h"
+#ifdef USE_TILE
+#include "tiledoll.h"
+#include "tilemcache.h"
+#include "tilepick-p.h"
+#endif
 
 // Defined in main.cc; not exposed in a header.
 void world_reacts();
+
+static bool _find_spot_near(const coord_def &centre, const player &who,
+                            coord_def &spot);
 
 namespace
 {
@@ -60,6 +76,30 @@ namespace
     vector<string> stop_auto;
     // A message to show this player when they next get the keyboard.
     vector<string> notice;
+    // Revival: how long (aut) someone has spent doing nothing on each fallen
+    // player's body. A fallen player has pending_revival set (as a Felid
+    // between lives) and never gets a turn.
+    vector<int> revive_progress;
+#ifdef USE_TILE
+    // Tiles draws the player in `you` from the global `player_doll` (body,
+    // hair... chosen for the character) plus their current equipment. Each
+    // party member has their own base doll, swapped in and out of
+    // player_doll with them, and a full doll (base + equipment) recorded
+    // whenever they're swapped out, for drawing them when it isn't their turn.
+    vector<dolls_data> base_dolls;
+    vector<dolls_data> dolls;
+
+    // The full doll of the player in `you`.
+    dolls_data current_full_doll()
+    {
+        dolls_data d = player_doll;
+        fill_doll_equipment(d);
+        return d;
+    }
+#endif
+    // Set when the current action was "doing nothing" (wait/rest, or an
+    // automatic wait during a group activity); counts towards revival.
+    bool idle_action = false;
     // Group activity (explore or rest): index of the player leading it, or
     // -1. Everyone else follows along automatically on their turns.
     int group_leader = -1;
@@ -85,12 +125,19 @@ namespace
         if (idx == focused)
             return;
 
+#ifdef USE_TILE
+        base_dolls[focused] = player_doll;
+        dolls[focused] = current_full_doll();
+#endif
         package *save = you.save;
         you.save = nullptr;
         swap(you, *slots[focused]);   // park the focused player
         swap(you, *slots[idx]);       // bring in the new one
         you.save = save;
         focused = idx;
+#ifdef USE_TILE
+        player_doll = base_dolls[idx];
+#endif
         // The view geometry (viewport centre, LOS bounds) tracks the player
         // in `you`; drawing and targeting index arrays by it.
         crawl_view.set_player_at(you.pos());
@@ -135,7 +182,8 @@ namespace
             for (int k = 0; k < n; ++k)
             {
                 const int j = (active + k) % n;
-                if (spent[j] < PARTY_ROUND_AUT)
+                if (spent[j] < PARTY_ROUND_AUT
+                    && !party_member(j).pending_revival)
                 {
                     active = j;
                     swap_in(j);
@@ -192,6 +240,11 @@ int party_add_player(const coord_def &pos)
         spent.push_back(0);
         stop_auto.emplace_back();
         notice.emplace_back();
+        revive_progress.push_back(0);
+#ifdef USE_TILE
+        base_dolls.push_back(player_doll);
+        dolls.push_back(current_full_doll());
+#endif
         active = focused = 0;
     }
 
@@ -207,6 +260,12 @@ int party_add_player(const coord_def &pos)
     spent.push_back(0);
     stop_auto.emplace_back();
     notice.emplace_back();
+    revive_progress.push_back(0);
+#ifdef USE_TILE
+    // A copy of `you` looks like them (until rebuilt as a new character).
+    base_dolls.push_back(player_doll);
+    dolls.push_back(current_full_doll());
+#endif
     return slots.size() - 1;
 }
 
@@ -219,6 +278,12 @@ void party_reset()
     spent.clear();
     stop_auto.clear();
     notice.clear();
+    revive_progress.clear();
+#ifdef USE_TILE
+    base_dolls.clear();
+    dolls.clear();
+#endif
+    idle_action = false;
     group_leader = -1;
     group_kind = group_activity::none;
     follow_target.reset();
@@ -254,6 +319,137 @@ void party_spend(int aut)
     you.time_taken = aut;
     you.turn_is_over = true;
     party_action_done();
+}
+
+// Fallen player (other than the one in `you`) whose body is at `pos`, or -1.
+#ifdef USE_TILE
+tileidx_t party_doll_tile(int idx)
+{
+    if (idx < 0 || idx >= (int)dolls.size())
+        return 0;
+    // Fallen players are drawn see-through, like ghosts.
+    return mcache.register_doll(dolls[idx], party_member(idx).pending_revival);
+}
+#endif
+
+int party_corpse_at(const coord_def &pos)
+{
+    for (int i = 0; i < (int)slots.size(); ++i)
+        if (i != focused && slots[i]->pending_revival && slots[i]->pos() == pos)
+            return i;
+    return -1;
+}
+
+void party_note_idle_action()
+{
+    idle_action = true;
+}
+
+bool party_member_falls()
+{
+    if (!party_active() || you.pending_revival)
+        return you.pending_revival;   // already fallen: nothing more to do
+    bool anyone_left = false;
+    for (int i = 0; i < (int)slots.size(); ++i)
+        if (i != focused && slots[i]->hp > 0 && !slots[i]->pending_revival)
+            anyone_left = true;
+    if (!anyone_left)
+        return false;                 // last one standing: the game ends
+
+    const string name = party_member_name(focused);
+    you.pending_revival = true;
+    you.hp = 0;
+    you.deaths++;
+    stop_delay(true);
+    revive_progress[focused] = 0;
+    if (group_leader == focused)
+    {
+        group_leader = -1;
+        group_kind = group_activity::none;
+    }
+    {
+        const interrupt_block quiet;
+        mprf(MSGCH_DANGER, "%s has fallen! Another player can revive them by "
+             "resting on their body for %d turns.", name.c_str(),
+             PARTY_REVIVE_AUT / BASELINE_DELAY);
+    }
+    return true;
+}
+
+// Bring fallen player `f` back, next to their body, as a Felid comes back
+// from a lost life (full hp/mp, bad effects gone).
+static void _revive_member(int f)
+{
+    const int back_to = focused;
+    const coord_def body = party_member(f).pos();
+    swap_in(f);
+    revive();
+    coord_def spot;
+    you.position.reset();             // don't count as blocking our own spot
+    if (!_find_spot_near(body, you, spot))
+        spot = body;                  // shouldn't happen; stand on the body
+    you.position = spot;
+    swap_in(back_to);
+    revive_progress[f] = 0;
+    spent[f] = PARTY_ROUND_AUT;       // they act from the next round
+    mprf(MSGCH_PROMPT, "%s is revived!", party_member_name(f).c_str());
+}
+
+// The acting player just finished an action. If they're on a fallen
+// player's body and did nothing, that counts towards reviving them;
+// anything else (or leaving) starts it over.
+static void _tend_fallen(bool idle)
+{
+    for (int f = 0; f < (int)slots.size(); ++f)
+    {
+        if (f == focused || !slots[f]->pending_revival)
+            continue;
+        if (slots[f]->pos() != you.pos())
+        {
+            // Nobody on the body any more (e.g. you just stepped off it):
+            // the revival has to start over.
+            if (revive_progress[f] > 0 && party_member_at(slots[f]->pos()) < 0)
+            {
+                mprf("You leave %s's body; you'll have to start over.",
+                     party_member_name(f).c_str());
+                revive_progress[f] = 0;
+            }
+            continue;
+        }
+        if (!idle)
+        {
+            if (revive_progress[f] > 0)
+            {
+                mprf("You stop tending to %s.", party_member_name(f).c_str());
+            }
+            revive_progress[f] = 0;
+            continue;
+        }
+        if (revive_progress[f] == 0)
+        {
+            const interrupt_block quiet;
+            mprf("You tend to %s's body...", party_member_name(f).c_str());
+        }
+        revive_progress[f] += you.time_taken;
+        if (revive_progress[f] >= PARTY_REVIVE_AUT)
+            _revive_member(f);
+    }
+}
+
+bool party_reviving()
+{
+    for (int f = 0; f < (int)slots.size(); ++f)
+        if (f != focused && slots[f]->pending_revival
+            && slots[f]->pos() == you.pos())
+        {
+            return true;
+        }
+    return false;
+}
+
+int party_revive_progress(int idx)
+{
+    return revive_progress[idx];
 }
 
 static bool _doing(const player &p, group_activity kind)
@@ -302,6 +498,9 @@ string party_danger_seen()
 
 bool party_others_need_rest()
 {
+    // Resting on a fallen teammate's body: keep going until they're back.
+    if (party_reviving())
+        return true;
     for (int i = 0; i < (int)slots.size(); ++i)
     {
         if (i == focused || slots[i]->hp <= 0)
@@ -373,6 +572,8 @@ void party_action_done(bool manual)
         you.num_turns++;
 
     spent[active] += you.time_taken;
+    _tend_fallen(idle_action);
+    idle_action = false;
 
     // Exploring or resting with nobody leading: you lead, everyone else
     // follows along. (A stopped group activity can't restart this way: the
@@ -567,7 +768,7 @@ void party_focus_for_monster(const monster &mons)
     for (int i = 0; i < (int)slots.size(); ++i)
     {
         const player &p = party_member(i);
-        if (p.hp <= 0)
+        if (p.hp <= 0 || p.pending_revival)
             continue;
         const bool visible = cell_see_cell(mons.pos(), p.pos(), LOS_DEFAULT);
         const int score = grid_distance(mons.pos(), p.pos())
@@ -584,8 +785,20 @@ void party_focus_for_monster(const monster &mons)
 
 void party_restore_focus()
 {
-    if (party_active())
-        swap_in(active);
+    if (!party_active())
+        return;
+    // Never leave a fallen player in `you` for the rest of world_reacts().
+    int idx = active;
+    if (party_member(idx).pending_revival)
+    {
+        for (int i = 0; i < (int)slots.size(); ++i)
+            if (!party_member(i).pending_revival)
+            {
+                idx = i;
+                break;
+            }
+    }
+    swap_in(idx);
 }
 
 bool party_in_monster_phase()
@@ -667,20 +880,48 @@ static bool _find_spot_near(const coord_def &centre, const player &who,
            || _search_spot(centre, who, true, spot);
 }
 
-void party_start(int size)
+int party_add_character(const coord_def &pos, const newgame_def &ng)
+{
+    ASSERT(!in_monster_phase);
+    const int prev = active;
+    // Start from a copy (world state, level, position), then rebuild the
+    // character part of it as `ng` while it's swapped into `you`.
+    const int idx = party_add_player(pos);
+    party_switch_to(idx);
+    setup_party_member(ng);
+#ifdef USE_TILE
+    // Their own body, the default look for their species (player_doll is
+    // still the copied player's); swapping out records it as theirs.
+    for (int i = 0; i < TILEP_PART_MAX; i++)
+        player_doll.parts[i] = TILEP_SHOW_EQUIP;
+    tilep_race_default(you.species, you.experience_level, &player_doll);
+#endif
+    party_switch_to(prev);
+    return idx;
+}
+
+void party_start(int size, bool choose)
 {
     ASSERT(!in_monster_phase);
     size = min(size, PARTY_MAX_SIZE);
     while (party_size() < size)
     {
+        const string name = party_member_name(party_size());
         coord_def spot;
         if (!_find_spot_near(you.pos(), you, spot))
         {
-            mprf(MSGCH_ERROR, "No room for %s to join!",
-                 party_member_name(party_size()).c_str());
+            mprf(MSGCH_ERROR, "No room for %s to join!", name.c_str());
             break;
         }
-        party_add_player(spot);
+        newgame_def ng;
+        if (choose && choose_party_member(ng, name))
+            party_add_character(spot, ng);
+        else
+        {
+            if (choose)
+                mprf("%s joins as a copy of you.", name.c_str());
+            party_add_player(spot);
+        }
     }
     if (party_active())
     {
@@ -807,6 +1048,7 @@ bool party_group_explore_turn()
     {
         if (i != active && slots[i]->hp > 0 && _taking_stairs(*slots[i]))
         {
+            party_note_idle_action();
             you.turn_is_over = true;
             return true;
         }
@@ -860,6 +1102,7 @@ bool party_group_explore_turn()
     // Resting together: just wait (and regenerate) on your turns.
     if (kind == group_activity::rest)
     {
+        party_note_idle_action();
         you.turn_is_over = true;
         return true;
     }
@@ -867,6 +1110,7 @@ bool party_group_explore_turn()
     // Already beside the leader: wait for them to move on.
     if (grid_distance(you.pos(), leader.pos()) <= 1)
     {
+        party_note_idle_action();
         you.turn_is_over = true;
         return true;
     }
@@ -937,6 +1181,30 @@ LUAFN(party_lua_add_player)
     if (!in_bounds(pos))
         luaL_argerror(ls, 1, "position out of bounds");
     PLUARET(integer, party_add_player(pos) + 1);
+}
+
+// party.add_character(x, y, combo, weapon): e.g. ("DjFE", "unarmed").
+LUAFN(party_lua_add_character)
+{
+    const coord_def pos(luaL_safe_checkint(ls, 1), luaL_safe_checkint(ls, 2));
+    if (!in_bounds(pos))
+        luaL_argerror(ls, 1, "position out of bounds");
+    const string combo = luaL_checkstring(ls, 3);
+    newgame_def ng;
+    ng.type = GAME_TYPE_NORMAL;
+    ng.species = species::from_abbrev(combo.substr(0, 2).c_str());
+    ng.job = get_job_by_abbrev(combo.substr(2, 2).c_str());
+    ng.weapon = str_to_weapon(luaL_optstring(ls, 4, "unarmed"));
+    ng.name = party_member_name(party_size());
+    if (ng.species == SP_UNKNOWN || ng.job == JOB_UNKNOWN)
+        luaL_argerror(ls, 3, "unknown species/background abbreviation");
+    PLUARET(integer, party_add_character(pos, ng) + 1);
+}
+
+// party.species(i): e.g. "Djinni".
+LUAFN(party_lua_species)
+{
+    PLUARET(string, species::name(party_member(_lua_index(ls, 1)).species).c_str());
 }
 
 LUAFN(party_lua_switch_to)
@@ -1014,6 +1282,27 @@ LUAFN(party_lua_manual_points)
     PLUARET(integer, party_manual_points(idx, sk));
 }
 
+// party.form(i): player i's current form ("" if none), read from their own
+// struct (not `you`), so it shows whether a transformation leaked across.
+LUAFN(party_lua_form)
+{
+    const player &p = party_member(_lua_index(ls, 1));
+    PLUARET(string, p.form == transformation::none ? ""
+                    : transform_name(p.form));
+}
+
+// party.fallen(i): is player i down, waiting to be revived?
+LUAFN(party_lua_fallen)
+{
+    PLUARET(boolean, party_member(_lua_index(ls, 1)).pending_revival);
+}
+
+// party.revive_progress(i): turns spent tending player i's body so far.
+LUAFN(party_lua_revive_progress)
+{
+    PLUARET(integer, party_revive_progress(_lua_index(ls, 1)) / BASELINE_DELAY);
+}
+
 LUAFN(party_lua_hp)
 {
     const player &p = party_member(_lua_index(ls, 1));
@@ -1045,6 +1334,11 @@ const struct luaL_Reg party_dlib[] =
 { "active", party_lua_active },
 { "add_player", party_lua_add_player },
 { "switch_to", party_lua_switch_to },
+{ "add_character", party_lua_add_character },
+{ "species", party_lua_species },
+{ "fallen", party_lua_fallen },
+{ "form", party_lua_form },
+{ "revive_progress", party_lua_revive_progress },
 { "spend", party_lua_spend },
 { "reset", party_lua_reset },
 { "hp", party_lua_hp },

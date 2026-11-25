@@ -678,6 +678,7 @@ public:
     int         view_delay;
 
     int         party_size;             // hotseat party (multiplayer prototype)
+    bool        party_choose_characters; // extra players pick their own
 
     bool        arena_dump_msgs;
     bool        arena_dump_msgs_all;

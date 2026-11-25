@@ -65,6 +65,8 @@ public:
     ~mcache_manager();
 
     tileidx_t register_monster(const monster_info& mon);
+    // A player-style doll, e.g. another player in a multiplayer party.
+    tileidx_t register_doll(const dolls_data& doll, bool transparent = false);
     mcache_entry *get(tileidx_t idx);
 
     void clear_nonref();
@@ -73,6 +75,7 @@ public:
     bool empty() { return m_entries.empty(); }
 
 protected:
+    tileidx_t store(mcache_entry *entry);
     vector<mcache_entry*> m_entries;
 };
 

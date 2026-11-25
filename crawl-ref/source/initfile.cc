@@ -671,6 +671,7 @@ const vector<GameOption*> game_options::build_options_list()
         new IntGameOption(SIMPLE_NAME(pickup_menu_limit), 1),
         new IntGameOption(SIMPLE_NAME(view_delay), DEFAULT_VIEW_DELAY, 0),
         new IntGameOption(SIMPLE_NAME(party_size), 1, 1, PARTY_MAX_SIZE),
+        new BoolGameOption(SIMPLE_NAME(party_choose_characters), true),
         new IntGameOption(SIMPLE_NAME(fail_severity_to_confirm), 3, -1, 5),
         new IntGameOption(SIMPLE_NAME(fail_severity_to_quiver), 3, -1, 5),
         new IntGameOption(SIMPLE_NAME(travel_delay), USING_DGL ? -1 : 20,

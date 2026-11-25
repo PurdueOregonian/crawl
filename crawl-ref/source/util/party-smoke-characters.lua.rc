@@ -1,0 +1,42 @@
+# MENU-KEYS: nx
+# (The runner types these into player 2's character menus: n = Djinni,
+#  x = Fire Elementalist. Player 1 comes from the rc options: Minotaur
+#  Gladiator.)
+<
+-- Each player picks their own character at game start. Check the game then
+-- runs with both, and that each turn shows the right character.
+local step = 0
+local finished = false
+local function d(code) return crawl.call_dlua(code) end
+local function log(s) crawl.stderr("SMOKE " .. s .. "\n") end
+local function finish(msg) log(msg); log("DONE"); finished = true end
+
+function ready()
+  if finished then return end
+  local s1 = d("return party.species(1)")
+  local s2 = d("return party.size() > 1 and party.species(2) or 'none'")
+  if step == 0 then
+    log("START p1=" .. s1 .. " p2=" .. s2)
+    if s1 ~= "Minotaur" or s2 ~= "Djinni" then
+      finish("FAIL expected Minotaur + Djinni, got " .. s1 .. " + " .. s2)
+      return
+    end
+    step = 1
+    crawl.sendkeys("s")                 -- player 1 waits
+  elseif step == 1 then
+    -- Now player 2's turn: `you` must be the djinni.
+    if d("return party.active()") ~= 2 or you.race() ~= "Djinni" then
+      finish("FAIL player 2's turn shows a " .. you.race())
+      return
+    end
+    step = 2
+    crawl.sendkeys("s")                 -- player 2 waits
+  elseif step == 2 then
+    if you.race() ~= "Minotaur" then
+      finish("FAIL back on player 1's turn but `you` is a " .. you.race())
+      return
+    end
+    finish("PASS separate characters: Minotaur and Djinni take turns")
+  end
+end
+>

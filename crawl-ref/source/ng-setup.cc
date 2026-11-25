@@ -536,35 +536,12 @@ static void _set_starting_form(transformation form)
     set_form(form, 1);
 }
 
-static void _setup_generic(const newgame_def& ng,
-                           bool normal_dungeon_setup /*for catch2-tests*/)
+// Build the character described by `ng` in `you`: name, species, job, stats,
+// mutations, items, skills, spells, hp/mp. Everything that belongs to the
+// character rather than the game (no rng reset, dungeon or save file), so
+// party members can be created mid-game too (see setup_party_member()).
+static void _setup_character(const newgame_def& ng)
 {
-    // this seems non-ideal, but messages are not being displayed at this point
-    // so if a force_more_message triggers, the more will just show on a blank
-    // screen. TODO: it's not clear to me why the more can show up without
-    // the message that triggered it.
-    unwind_bool no_more(crawl_state.show_more_prompt, false);
-
-    rng::reset(); // initialize rng from Options.seed
-    _init_player();
-    you.game_seed = crawl_state.seed;
-    you.deterministic_levelgen =
-                            Options.pregen_dungeon != level_gen_type::classic;
-
-#if TAG_MAJOR_VERSION == 34
-    // Avoid the remove_dead_shops() Gozag fixup in new games: see
-    // ShoppingList::item_type_identified().
-    you.props[REMOVED_DEAD_SHOPS_KEY] = true;
-#endif
-
-    // Needs to happen before we give the player items, so that item specs
-    // in job descriptions can be parsed safely.
-    initialise_item_sets();
-
-    // Needs to happen before we give the player items, so that it's safe to
-    // check whether those items need to be removed from their shopping list.
-    shopping_list.refresh();
-
     you.your_name  = ng.name;
     you.species    = ng.species;
     you.char_class = ng.job;
@@ -668,6 +645,38 @@ static void _setup_generic(const newgame_def& ng,
     // Make sure the starting player is fully charged up.
     set_hp(you.hp_max);
     set_mp(you.max_magic_points);
+}
+
+static void _setup_generic(const newgame_def& ng,
+                           bool normal_dungeon_setup /*for catch2-tests*/)
+{
+    // this seems non-ideal, but messages are not being displayed at this point
+    // so if a force_more_message triggers, the more will just show on a blank
+    // screen. TODO: it's not clear to me why the more can show up without
+    // the message that triggered it.
+    unwind_bool no_more(crawl_state.show_more_prompt, false);
+
+    rng::reset(); // initialize rng from Options.seed
+    _init_player();
+    you.game_seed = crawl_state.seed;
+    you.deterministic_levelgen =
+                            Options.pregen_dungeon != level_gen_type::classic;
+
+#if TAG_MAJOR_VERSION == 34
+    // Avoid the remove_dead_shops() Gozag fixup in new games: see
+    // ShoppingList::item_type_identified().
+    you.props[REMOVED_DEAD_SHOPS_KEY] = true;
+#endif
+
+    // Needs to happen before we give the player items, so that item specs
+    // in job descriptions can be parsed safely.
+    initialise_item_sets();
+
+    // Needs to happen before we give the player items, so that it's safe to
+    // check whether those items need to be removed from their shopping list.
+    shopping_list.refresh();
+
+    _setup_character(ng);
 
     if (normal_dungeon_setup)
         initial_dungeon_setup();
@@ -693,4 +702,73 @@ static void _setup_generic(const newgame_def& ng,
     {
         die("Builder failure while trying to generate temple!");
     }
+}
+
+// Multiplayer party: turn the player in `you` (a copy of an existing party
+// member, swapped in by party.cc) into the new character described by `ng`.
+// The `player` struct holds game/world state as well as the character --
+// level generation records, ids, the current level and position -- so that
+// is carried over and only the character is rebuilt.
+void setup_party_member(const newgame_def& ng)
+{
+    unwind_bool no_more(crawl_state.show_more_prompt, false);
+
+    package *save = you.save;   // the game's save, not the character's
+    you.save = nullptr;
+    const player world = you;
+
+    you = player();
+
+    // Where and when.
+    you.where_are_you   = world.where_are_you;
+    you.depth           = world.depth;
+    you.position        = world.position;
+    you.on_current_level = world.on_current_level;
+    you.elapsed_time    = world.elapsed_time;
+    you.num_turns       = world.num_turns;
+    you.birth_time      = world.birth_time;
+    you.real_time_ms    = world.real_time_ms;
+    you.chapter         = world.chapter;
+
+    // Game mode and seeding.
+    you.wizard          = world.wizard;
+    you.explore         = world.explore;
+    you.game_seed       = world.game_seed;
+    you.fully_seeded    = world.fully_seeded;
+    you.deterministic_levelgen = world.deterministic_levelgen;
+    you.prev_save_version = world.prev_save_version;
+
+    // Level generation bookkeeping: uniques, unrands, vaults, ids. Losing these
+    // would let a later level regenerate a unique or reuse a vault.
+    you.unique_creatures = world.unique_creatures;
+    you.unique_items     = world.unique_items;
+    you.octopus_king_rings = world.octopus_king_rings;
+    you.uniq_map_tags    = world.uniq_map_tags;
+    you.uniq_map_names   = world.uniq_map_names;
+    you.uniq_map_tags_abyss  = world.uniq_map_tags_abyss;
+    you.uniq_map_names_abyss = world.uniq_map_names_abyss;
+    you.vault_list       = world.vault_list;
+    you.zot_orb_monster  = world.zot_orb_monster;
+    you.zot_orb_monster_known = world.zot_orb_monster_known;
+    you.dactions         = world.dactions;
+    you.last_mid         = world.last_mid;
+    you.last_item_uid    = world.last_item_uid;
+    you.obtainable_runes = world.obtainable_runes;
+    you.branches_left    = world.branches_left;
+    you.abyss_speed      = world.abyss_speed;
+    you.seen_weapon      = world.seen_weapon;
+    you.seen_armour      = world.seen_armour;
+    you.seen_misc        = world.seen_misc;
+    you.seen_talisman    = world.seen_talisman;
+
+    // Props mix both kinds (visited levels, shop fixups, ... and character
+    // keys). Start from the world's; character setup below sets its own keys
+    // on top. XXX: a character key the old player had and the new one
+    // doesn't set would carry over; at game start there are few such keys.
+    you.props = world.props;
+
+    shopping_list.refresh();
+    _setup_character(ng);
+
+    you.save = save;
 }

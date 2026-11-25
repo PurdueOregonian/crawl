@@ -30,14 +30,52 @@
 #include <vector>
 
 class monster;
+struct newgame_def;
 class player;
 
 const int PARTY_ROUND_AUT = 10;
 const int PARTY_MAX_SIZE = 4;
 
-// Grow the party to `size` players (clones of the current player), placed
-// near them. Used at game start when the party_size option is > 1.
-void party_start(int size);
+// Doing nothing on a fallen player's body for this long (50 turns) revives
+// them.
+const int PARTY_REVIVE_AUT = 500;
+
+// The player in `you` has just died. If anyone else in the party is still
+// standing, they fall instead (pending_revival, like a Felid between lives;
+// they get no turns and monsters ignore them) and this returns true. False
+// means they were the last one, so the game really ends.
+bool party_member_falls();
+
+// The current action was "doing nothing" (wait, rest, or an automatic wait
+// during a group activity): if done on a fallen player's body, it counts
+// towards reviving them.
+void party_note_idle_action();
+
+#ifdef USE_TILE
+#include "rltiles/tiledef_defines.h"
+// Tile for drawing party member `idx` (not the one in `you`) as themselves:
+// their own doll, see-through if fallen. 0 if unknown.
+tileidx_t party_doll_tile(int idx);
+#endif
+
+// Fallen player (not the one in `you`) whose body is at `pos`, or -1.
+int party_corpse_at(const coord_def &pos);
+
+// Is the player in `you` standing on a fallen teammate's body?
+bool party_reviving();
+
+// How long (aut) someone has tended fallen player `idx`'s body so far.
+int party_revive_progress(int idx);
+
+// Grow the party to `size` players, placed near the current one. With
+// `choose`, each new player picks their own character from the new-game
+// menus (backing out gives a copy of the current player); otherwise they're
+// all copies. Used at game start when the party_size option is > 1.
+void party_start(int size, bool choose = false);
+
+// Add a player at `pos` playing the character described by `ng` (species,
+// job, weapon). World state and level come from the current player.
+int party_add_character(const coord_def &pos, const newgame_def &ng);
 
 // Called by the main loop wherever a solo game would call world_reacts()
 // after the player acts: does the acting player's per-action upkeep and

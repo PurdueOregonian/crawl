@@ -1,0 +1,64 @@
+<
+-- Talismans transform only the player who uses one. Player 1 picks up a
+-- quill talisman and puts it on with the equip command (a multi-turn
+-- transform delay); player 2 must stay in their normal form throughout, and
+-- each keeps their own form across turns.
+local step = 0
+local passes = 0
+local finished = false
+local after = 0
+local function d(code) return crawl.call_dlua(code) end
+local function log(s) crawl.stderr("SMOKE " .. s .. "\n") end
+local function finish(msg) log(msg); log("DONE"); finished = true end
+local function forms()
+  return d("return party.form(1)"), d("return party.form(2)")
+end
+
+function ready()
+  if finished then return end
+  passes = passes + 1
+  if passes > 60 then finish("FAIL gave up at step " .. step); return end
+  local active = d("return party.active()")
+  local f1, f2 = forms()
+  if f2 ~= "" then
+    finish("FAIL player 2 transformed (" .. f2 .. ") step " .. step); return
+  end
+
+  if step == 0 then
+    d("dgn.dismiss_monsters()")
+    if active ~= 1 then crawl.sendkeys("s"); return end
+    d([[local x, y = you.pos(); dgn.create_item(x, y, "quill talisman")]])
+    step = 1
+    crawl.sendkeys(",")                    -- player 1 picks it up
+  elseif step == 1 then
+    if active ~= 1 then crawl.sendkeys("s"); return end
+    local tal
+    for _, it in ipairs(items.inventory()) do
+      if it.name():find("talisman") then tal = it end
+    end
+    if not tal then finish("FAIL player 1 has no talisman"); return end
+    log("P1 puts on " .. tal.name())
+    step = 2
+    -- The real command: e(quip), the talisman's letter, then "y" for any
+    -- confirmation (e.g. armour melding into the new form; without a prompt
+    -- it's just a step). (item:equip() from Lua refuses talismans.)
+    crawl.sendkeys("e" .. items.index_to_letter(tal.slot) .. "y")
+  elseif step == 2 then
+    -- Player 1's transform runs over their turns; player 2 just waits.
+    if f1 ~= "" then
+      log("P1 is now " .. f1 .. "; P2 still normal")
+      step = 3
+    end
+    crawl.sendkeys("s")
+  elseif step == 3 then
+    -- A few more rounds: forms must stay with their owners.
+    after = after + 1
+    if f1 == "" then finish("FAIL player 1 lost their form"); return end
+    if after >= 4 then
+      finish("PASS talisman transformed only player 1 (" .. f1 .. ")")
+      return
+    end
+    crawl.sendkeys("s")
+  end
+end
+>

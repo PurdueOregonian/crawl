@@ -8,12 +8,15 @@
 #   rest    - group rest: player 2 rests along until everyone is healed;
 #             then an enemy near the inactive player must block resting
 #             without crashing.
+#   talisman - player 1 transforms with a talisman; player 2 must not.
+#   characters - player 2 picks their own character from the new-game menus
+#             (the runner types the keys from the scenario's MENU-KEYS line).
 #
 # Real stairs need a real save file, which the headless -test harness lacks,
 # so this is the check for level changes.
 #
 # Usage (from crawl-ref/source):
-#   pwsh util/party-smoke.ps1 [-Scenario stairs|explore|rest|all] [-TimeoutSec 60]
+#   pwsh util/party-smoke.ps1 [-Scenario stairs|explore|rest|characters|talisman|all] [-TimeoutSec 60]
 # Exit code: 0 = PASS, 1 = FAIL, 2 = crash/timeout. Prints the script's log
 # and the final screen (read with util/peek-console.ps1).
 
@@ -21,7 +24,7 @@ param([string]$Scenario = "all", [int]$TimeoutSec = 60)
 
 if ($Scenario -eq "all") {
     $worst = 0
-    foreach ($s in "stairs", "explore", "rest") {
+    foreach ($s in "stairs", "explore", "rest", "characters", "talisman") {
         "##### scenario: $s"
         & pwsh -NoProfile -File $PSCommandPath -Scenario $s -TimeoutSec $TimeoutSec
         $worst = [Math]::Max($worst, $LASTEXITCODE)
@@ -48,7 +51,16 @@ $header = @(
     "morgue_dir = $($work -replace '\\','/')/morgue",
     ""
 )
-Set-Content $rc ($header + (Get-Content (Join-Path $PSScriptRoot "party-smoke-$Scenario.lua.rc")))
+# (Not "$scenario": PowerShell names are case-insensitive, so that would be
+# the [string] $Scenario parameter and the lines would get joined into one.)
+$scenarioLines = @(Get-Content (Join-Path $PSScriptRoot "party-smoke-$Scenario.lua.rc"))
+# Keys to type into player 2's character menus, if the scenario wants any.
+$menuKeys = ($scenarioLines | Select-String "^# MENU-KEYS: (\S+)\s*$" | Select-Object -First 1)
+$menuKeys = if ($menuKeys) { $menuKeys.Matches[0].Groups[1].Value.Trim() } else { "" }
+# Without menu keys, nobody can answer player 2's character menus: make the
+# extra players copies instead.
+if (-not $menuKeys) { $header += "party_choose_characters = false" }
+Set-Content $rc ($header + $scenarioLines)
 
 # cmd /c gives crawl its own console; the script logs via crawl.stderr.
 $cmdline = "`"`"$exe`" -wizard -rc `"$rc`" > `"$log`" 2>&1`""
@@ -56,11 +68,46 @@ $p = Start-Process cmd.exe -ArgumentList "/c", $cmdline -WorkingDirectory $src `
         -WindowStyle Minimized -PassThru
 
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
+$menuDone = ($menuKeys -eq "")
+$lastLen = -1; $lastGrowth = Get-Date; $escapes = 0
 while ((Get-Date) -lt $deadline -and -not $p.HasExited) {
     Start-Sleep -Milliseconds 500
+    if (-not $menuDone) {
+        $c = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" |
+             Where-Object Name -eq "crawl.exe"
+        if ($c) {
+            $screen = (pwsh -NoProfile -File (Join-Path $PSScriptRoot "peek-console.ps1") -ProcessId $c.ProcessId) -join "`n"
+            if ($screen -match "Please select your species") {
+                # One key per menu; give each menu a moment to appear.
+                foreach ($ch in $menuKeys.ToCharArray()) {
+                    pwsh -NoProfile -File (Join-Path $PSScriptRoot "send-console-keys.ps1") -ProcessId $c.ProcessId -Keys "$ch" | Out-Null
+                    Start-Sleep -Milliseconds 1500
+                }
+                $menuDone = $true
+            }
+        }
+    }
     if ((Test-Path $log) -and
         (Select-String -Path $log -Pattern "SMOKE DONE|SMOKE FAIL|We crashed|GAVE UP" -Quiet)) { break }
+
+    # Random levels sometimes open a menu the script can't answer (e.g.
+    # walking onto a shop). If the log stops growing for a while, press Esc.
+    # (A genuinely stuck game still times out: Esc won't unstick a loop.)
+    if ($menuDone -and (Test-Path $log)) {
+        $len = (Get-Item $log).Length
+        if ($len -ne $lastLen) { $lastLen = $len; $lastGrowth = Get-Date }
+        elseif (((Get-Date) - $lastGrowth).TotalSeconds -gt 20) {
+            $c = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" |
+                 Where-Object Name -eq "crawl.exe"
+            if ($c) {
+                pwsh -NoProfile -File (Join-Path $PSScriptRoot "send-console-keys.ps1") -ProcessId $c.ProcessId -Keys "{ESC}" | Out-Null
+                $escapes++
+            }
+            $lastGrowth = Get-Date
+        }
+    }
 }
+if ($escapes) { "(pressed Esc $escapes time(s) to leave menus the script couldn't answer)" }
 
 $crawl = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" |
          Where-Object Name -eq "crawl.exe"

@@ -436,7 +436,9 @@ static void _draw_party_member(screen_cell_t *cell, const coord_def &gc,
     cell->colour = party_colours[idx % ARRAYSZ(party_colours)];
     cell->colour = real_colour(cell->colour, gc);
 #ifdef USE_TILE
-    cell->tile.fg = tileidx_player();
+    // Their own doll; tileidx_player() would draw whoever is in `you`.
+    const tileidx_t doll = party_doll_tile(idx);
+    cell->tile.fg = doll ? doll : tileidx_player();
     cell->tile.bg = tile_env.bk_bg(gc);
     cell->tile.cloud = tile_env.bk_cloud(gc);
 #endif
@@ -952,6 +954,12 @@ void draw_cell(screen_cell_t *cell, const coord_def &gc,
              && _layers & Layer::PLAYER)
     {
         _draw_party_member(cell, gc, party_member_at(gc));
+    }
+    else if (you.see_cell(gc) && party_corpse_at(gc) >= 0
+             && _layers & Layer::PLAYER)
+    {
+        _draw_party_member(cell, gc, party_corpse_at(gc));
+        cell->glyph = '%';   // a fallen player's body
     }
     else if (you.see_cell(gc))
         _draw_los(cell, gc, anim_updates);

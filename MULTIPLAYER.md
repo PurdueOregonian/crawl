@@ -14,8 +14,11 @@ Add this to your init file (`init.txt` / `.crawlrc`):
 party_size = 2        # 1-4; 1 = normal single-player Crawl
 ```
 
-Then start a new game as usual. The other players join next to you as
-copies of your starting character.
+Then start a new game as usual. After you've made your character, each
+other player picks their own species and background from the same menus
+("Welcome, Player 2..."). Add `party_choose_characters = false` to skip
+that and have them join as copies of you (Esc in their menus does the same
+for that player).
 
 - **Taking turns.** Players act one at a time. `--- Player 2's turn ---`
   appears when control passes. Once every player has spent a full turn,
@@ -49,7 +52,15 @@ copies of your starting character.
   placed beside you; if you arrive in a closet, its door is opened so nobody
   is shut away.
 - **Skill manuals teach everyone.** When one player picks up a manual, every
-  player gets its bonus training.
+  player gets its bonus training. Spellbooks and parchments add their
+  spells to everyone's library too (except djinn, who have none).
+- **Falling and revival.** A player who dies while a teammate is still
+  standing falls instead of ending the game: their body (`%`, or a faded
+  doll in Tiles) stays where they fell and travels with the party. Stand on
+  it and do nothing (wait or rest) for 50 turns to revive them, at full HP
+  and MP. Doing anything else, or stepping off, starts the count over. The
+  game ends only when the last player standing dies.
+- **Talismans and forms** only affect the player who uses them.
 - On the map, the active player is drawn as the normal `@`. Everyone else
   is a coloured `@` (player 1 white, player 2 cyan, player 3 yellow,
   player 4 magenta). The view and status panel follow whoever's turn it is.
@@ -58,11 +69,8 @@ copies of your starting character.
 
 - **No saving yet.** Only the active player is saved. On reload, the
   others rejoin as fresh copies of that player.
-- **One death ends the game** for everyone. A revive mechanic is planned.
 - **Spells and area effects** (fireballs, clouds, beams) only affect the
   player whose turn it is, not other party members in range.
-- **Everyone starts as the same character.** Separate character creation
-  is planned.
 - **Some per-turn god effects** only apply to the player who is acting.
 
 ## Roadmap
@@ -70,8 +78,8 @@ copies of your starting character.
 1. ~~Two-player core (turn rounds, monster targeting)~~
 2. ~~Hotseat play (input, turn handoff, drawing, level changes)~~
 3. ~~Group autoexplore and rest~~
-4. Shared inventory
-5. Revive: stand on a fallen player for 20 turns
+4. ~~Separate characters; revive a fallen player (50 turns on their body)~~
+5. Shared inventory
 6. Per-player gods
 7. More shops, items and monsters to match party size
 8. LAN play through WebTiles

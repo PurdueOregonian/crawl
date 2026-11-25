@@ -23,6 +23,7 @@ void choose_tutorial_character(newgame_def& ng_choice);
 
 void forget_weapon_if_random(newgame_def& ng_choice);
 
+bool choose_party_member(newgame_def& ng, const string &name);
 bool choose_game(newgame_def& ng, newgame_def& choice,
                  const newgame_def& defaults);
 

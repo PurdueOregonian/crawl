@@ -95,6 +95,21 @@ protected:
     dolls_data m_doll;
 };
 
+// A doll given directly, e.g. another player in a multiplayer party.
+class mcache_doll : public mcache_entry
+{
+public:
+    mcache_doll(const dolls_data &doll, bool trans)
+        : m_doll(doll), m_trans(trans) {}
+
+    const dolls_data *doll() const override { return &m_doll; }
+    bool transparent() const override { return m_trans; }
+
+protected:
+    dolls_data m_doll;
+    bool m_trans;
+};
+
 class mcache_demon : public mcache_entry
 {
 public:
@@ -186,6 +201,11 @@ tileidx_t mcache_manager::register_monster(const monster_info& minf)
     else
         return 0;
 
+    return store(entry);
+}
+
+tileidx_t mcache_manager::store(mcache_entry *entry)
+{
     tileidx_t idx = ~0;
 
     for (tileidx_t i = 0; i < (tileidx_t)m_entries.size(); i++)
@@ -205,6 +225,11 @@ tileidx_t mcache_manager::register_monster(const monster_info& minf)
     }
 
     return TILEP_MCACHE_START + idx;
+}
+
+tileidx_t mcache_manager::register_doll(const dolls_data& doll, bool transparent)
+{
+    return store(new mcache_doll(doll, transparent));
 }
 
 void mcache_manager::clear_nonref()
