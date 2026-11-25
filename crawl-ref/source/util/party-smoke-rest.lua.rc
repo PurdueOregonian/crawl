@@ -1,0 +1,85 @@
+<
+-- Group rest on a monster-free D:1. Both players are hurt; player 1 rests.
+-- Player 2 must rest along automatically, and nobody may get the keyboard
+-- back until the whole party has healed.
+-- Then, on player 2's turn, a goblin appears in view of player 1 and player 2
+-- tries to rest. The party's danger check looks through player 1's eyes
+-- first, which used to crash (monster::visible_to asserts its looker is the
+-- player in `you`).
+local readies = 0
+local stage = "rest"
+local finished = false
+local function d(code) return crawl.call_dlua(code) end
+local function log(s) crawl.stderr("SMOKE " .. s .. "\n") end
+local function finish(msg) log(msg); log("DONE"); finished = true end
+
+local function hp(i)
+  return d("local h, m = party.hp(" .. i .. "); return h .. '/' .. m")
+end
+local function full(i)
+  return d("local h, m = party.hp(" .. i .. "); return h == m")
+end
+local function active() return d("return party.active()") end
+
+-- Put a goblin near player 1 where the party can see it.
+local function place_goblin()
+  return d([[
+    local x, y = party.pos(1)
+    for dx = -3, 3 do for dy = -3, 3 do
+      if math.abs(dx) + math.abs(dy) >= 2 then
+        local m = dgn.create_monster(x + dx, y + dy, "goblin")
+        if m then
+          if party.danger() ~= "" then return true end
+          dgn.dismiss_monsters()
+        end
+      end
+    end end
+    return false]])
+end
+
+function ready()
+  if finished then return end
+  readies = readies + 1
+  if readies == 1 then
+    d("dgn.dismiss_monsters()")
+    d("party.set_hp(1, 1); party.set_hp(2, 1)")
+    log("start: p1 " .. hp(1) .. " p2 " .. hp(2))
+    crawl.sendkeys("5")
+    return
+  end
+  log(string.format("prompt %d (%s): active=%d p1=%s p2=%s rest_leader=%d time=%d",
+      readies - 1, stage, active(), hp(1), hp(2),
+      d("return party.rest_leader()"), d("return you.time()")))
+
+  if stage == "rest" then
+    if not (full(1) and full(2)) then
+      finish("FAIL player " .. active()
+             .. " was prompted before the party finished resting")
+      return
+    end
+    log("group rest OK: whole party healed before anyone was prompted")
+    stage = "handoff"
+    if active() == 1 then
+      crawl.sendkeys("s")   -- wait a turn: control passes to player 2
+      return
+    end
+  end
+
+  if stage == "handoff" then
+    if active() ~= 2 then finish("FAIL expected player 2's turn"); return end
+    if not place_goblin() then finish("FAIL couldn't place a visible goblin"); return end
+    log("goblin placed; danger: '" .. d("return party.danger()") .. "'")
+    d("party.set_hp(1, 1); party.set_hp(2, 1)")
+    stage = "danger"
+    crawl.sendkeys("5")
+    return
+  end
+
+  -- stage == "danger": got here without crashing; resting must be refused.
+  if d("return party.rest_leader()") ~= 0 then
+    finish("FAIL the party started resting with a goblin in view")
+  else
+    finish("PASS group rest; danger check sees through the inactive player's eyes")
+  end
+end
+>

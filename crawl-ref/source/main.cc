@@ -467,6 +467,9 @@ NORETURN static void _launch_game()
 
     // Hotseat party (multiplayer prototype). Party members aren't saved yet,
     // so a reloaded game starts the party again from the loaded character.
+    // The party lives in globals, so drop any left over from a previous game
+    // played in this process (restart after death/quit) first.
+    party_reset();
     if (Options.party_size > 1)
     {
         if (!game_start)
@@ -824,6 +827,17 @@ static void _start_running(int dir, int mode)
         return;
     }
 
+    // In a party, nobody rests while any player can see an enemy.
+    if (mode == RMODE_REST_DURATION || mode == RMODE_WAIT_DURATION)
+    {
+        const string danger = party_danger_seen();
+        if (!danger.empty())
+        {
+            mprf(MSGCH_WARN, "%s; you can't rest now.", danger.c_str());
+            return;
+        }
+    }
+
     you.running.initialise(dir, mode);
 }
 
@@ -1092,10 +1106,17 @@ static int _stun_delay()
 // Wherever the main loop has finished one player action. Solo: the world
 // reacts as usual. In a party: the acting player's upkeep runs and the turn
 // passes on; the world reacts once everyone has acted (see party.cc).
-static void _player_action_done()
+// `keypress` is true when the action came from a command the player typed
+// (as opposed to a delay, stun, autopickup...).
+static void _player_action_done(bool keypress = false)
 {
     if (party_active())
-        party_action_done();
+    {
+        // A typed action that doesn't leave you auto-moving (explore, travel,
+        // rest) means someone is playing by hand: the others' auto-activities
+        // stop so they get control back on their turn.
+        party_action_done(keypress && !you.running);
+    }
     else
         world_reacts();
 }
@@ -1219,6 +1240,20 @@ static void _input()
     if (need_to_autoinscribe())
         autoinscribe();
 
+    // Party: explore/rest only while nobody can see an enemy, and a group rest
+    // ends once everyone has recovered. (Stops the activity; we then fall
+    // through and prompt for a command as usual.)
+    party_check_auto_activity();
+
+    // Leading a group explore with someone lagging behind: wait for them
+    // (the explore itself stays active and resumes next turn).
+    if (party_leader_waits_for_group())
+    {
+        you.turn_is_over = true;
+        _player_action_done();
+        return;
+    }
+
     if (you_are_delayed()
         && !dynamic_cast<MacroProcessKeyDelay*>(current_delay().get()))
     {
@@ -1251,6 +1286,13 @@ static void _input()
     }
 
     ASSERT(!you.turn_is_over);
+
+    // Following the party's explore leader: take the step automatically.
+    if (party_group_explore_turn())
+    {
+        _player_action_done();
+        return;
+    }
 
     crawl_state.check_term_size();
     if (crawl_state.terminal_resized)
@@ -1371,7 +1413,7 @@ static void _input()
 
         handle_channelled_spell();
 
-        _player_action_done();
+        _player_action_done(true);
     }
     else
     {
@@ -1746,6 +1788,19 @@ static void _take_stairs(bool down)
     if (!_can_take_stairs(ygrd, down, shaft))
         return;
 
+    // A party changes level together (everyone comes along), so everyone has
+    // to be right there. Transporters and passages stay on this level.
+    if (ygrd != DNGN_TRANSPORTER && ygrd != DNGN_PASSAGE_OF_GOLUBRIA)
+    {
+        const string missing = party_member_not_adjacent();
+        if (!missing.empty())
+        {
+            mprf("%s must be next to you to take the %s.", missing.c_str(),
+                 shaft ? "shaft" : "stairs");
+            return;
+        }
+    }
+
     if (you.caught())
     {
         you.struggle_against_net();
@@ -1868,9 +1923,21 @@ static void _do_rest()
         return;
     }
 
+    // In a party, nobody rests while any player can see an enemy. (Checked
+    // here too so we don't say "You start resting." first.)
+    {
+        const string danger = party_danger_seen();
+        if (!danger.empty())
+        {
+            mprf(MSGCH_WARN, "%s; you can't rest now.", danger.c_str());
+            return;
+        }
+    }
+
     if (i_feel_safe() && can_rest_here())
     {
-        if (you.is_sufficiently_rested(true) && ancestor_full_hp())
+        if (you.is_sufficiently_rested(true) && ancestor_full_hp()
+            && !party_others_need_rest())
         {
             mpr("You start waiting.");
             _start_running(RDIR_REST, RMODE_WAIT_DURATION);

@@ -57,6 +57,7 @@
 #include "options.h"
 #include "orb.h"
 #include "output.h"
+#include "party.h"
 #include "place.h"
 #include "player-equip.h"
 #include "player.h"
@@ -1857,21 +1858,23 @@ static void _get_book(item_def& it)
     {
         mprf("You pick up %s. Unfortunately, it's quite useless to you.",
              it.name(DESC_A).c_str());
-        return;
     }
-
-    if (you.skills[sk] >= MAX_SKILL_LEVEL)
+    else if (you.skills[sk] >= MAX_SKILL_LEVEL)
     {
         mprf("You pick up %s, but it has nothing more to teach you.",
              it.name(DESC_A).c_str());
-        return;
+    }
+    else
+    {
+        if (you.skill_manual_points[sk])
+            mprf("You pick up another %s and continue studying.", it.name(DESC_PLAIN).c_str());
+        else
+            mprf("You pick up %s and begin studying.", it.name(DESC_A).c_str());
+        you.skill_manual_points[sk] += it.skill_points;
     }
 
-    if (you.skill_manual_points[sk])
-        mprf("You pick up another %s and continue studying.", it.name(DESC_PLAIN).c_str());
-    else
-        mprf("You pick up %s and begin studying.", it.name(DESC_A).c_str());
-    you.skill_manual_points[sk] += it.skill_points;
+    // In a party, a manual teaches everyone (even if it's no use to you).
+    party_share_manual(sk, it.skill_points);
 }
 
 static void _get_voucher(item_def& it)

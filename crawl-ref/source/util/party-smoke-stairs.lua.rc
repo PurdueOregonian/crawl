@@ -34,7 +34,9 @@ function ready()
       log(same and "PASS party together on D:2" or "FAIL player 2 left behind")
       step = 99
     elseif d("return party.active()") == 2 then
-      crawl.sendkeys("s")     -- player 2 waits while player 1 climbs
+      -- Player 2 should wait automatically while player 1 climbs.
+      log("FAIL player 2 was asked for input while player 1 climbs " .. state())
+      step = 99
     end
   elseif step == 99 then
     log("DONE")

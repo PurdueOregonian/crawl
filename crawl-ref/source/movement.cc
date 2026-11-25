@@ -1181,11 +1181,25 @@ void move_player_action(coord_def move)
     if (you.confused() && !_adjust_confused_movement(move))
         return;
 
-    // Party members swap places, like allies do. If they can't, stay put.
-    if (party_member_at(you.pos() + move) >= 0
-        && !party_swap_places_with_member_at(you.pos() + move))
+    // Party members swap places, like allies do, when you walk into them on
+    // purpose -- and when exploring, since the explorer leads the group and
+    // the others only follow. Other travel stops instead: two players
+    // travelling the same way could swap back and forth forever.
+    const int mate = party_member_at(you.pos() + move);
+    if (mate >= 0)
     {
-        return;
+        if (you.running && !you.running.is_explore())
+        {
+            mprf("%s is in the way.", party_member_name(mate).c_str());
+            stop_running();
+            return;
+        }
+        if (!party_swap_places_with_member_at(you.pos() + move))
+        {
+            if (you.running)
+                stop_running();
+            return;
+        }
     }
 
     int num_steps = 1;

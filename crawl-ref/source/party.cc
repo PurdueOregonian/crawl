@@ -12,9 +12,11 @@
 #include <vector>
 
 #include "abyss.h"
+#include "act-iter.h"
 #include "cluautil.h"
 #include "coord.h"
 #include "coordit.h"
+#include "delay.h"
 #include "env.h"
 #include "fineff.h"
 #include "l-libs.h"
@@ -24,14 +26,21 @@
 #include "mapmark.h"
 #include "message.h"
 #include "monster.h"
+#include "movement.h"
+#include "nearby-danger.h"
+#include "unwind.h"
 #include "mon-util.h"
 #include "output.h"
 #include "player.h"
 #include "player-reacts.h"
 #include "religion.h"
+#include "shopping.h"
+#include "skills.h"
 #include "state.h"
 #include "stringutil.h"
 #include "terrain.h"
+#include "travel.h"
+#include "viewgeom.h"
 
 // Defined in main.cc; not exposed in a header.
 void world_reacts();
@@ -44,6 +53,23 @@ namespace
     vector<unique_ptr<player>> slots;
     // Time each player has spent in the current round.
     vector<int> spent;
+    // Why this player's auto-activity (explore, travel, rest) should stop
+    // when they next get control; empty if it shouldn't.
+    vector<string> stop_auto;
+    // A message to show this player when they next get the keyboard.
+    vector<string> notice;
+    // Group activity (explore or rest): index of the player leading it, or
+    // -1. Everyone else follows along automatically on their turns.
+    int group_leader = -1;
+    enum class group_activity { none, explore, rest };
+    group_activity group_kind = group_activity::none;
+    // While a follower is pathing to the leader, the leader's square must
+    // not count as blocked (party members otherwise block travel).
+    coord_def follow_target;
+    // Consecutive follower turns spent blocked; the leader waits for them,
+    // so without a limit a boxed-in follower would stall the party forever.
+    int follow_blocked_turns = 0;
+    const int FOLLOW_MAX_BLOCKED_TURNS = 5;
     int active = 0;
     int focused = 0;
     bool in_monster_phase = false;
@@ -63,6 +89,14 @@ namespace
         swap(you, *slots[idx]);       // bring in the new one
         you.save = save;
         focused = idx;
+        // The view geometry (viewport centre, LOS bounds) tracks the player
+        // in `you`; drawing and targeting index arrays by it.
+        crawl_view.set_player_at(you.pos());
+        // The shopping list caches a pointer into you.props, which the swap
+        // just replaced; left alone it dangles (crash on learning a spell).
+        // This is the only such cache: other code holding pointers into `you`
+        // does so within a single action, and swaps only happen between them.
+        shopping_list.refresh();
     }
 
     void activate_pending_markers()
@@ -154,6 +188,8 @@ int party_add_player(const coord_def &pos)
         slots.push_back(make_unique<player>(you));
         slots.back()->save = nullptr;
         spent.push_back(0);
+        stop_auto.emplace_back();
+        notice.emplace_back();
         active = focused = 0;
     }
 
@@ -167,14 +203,24 @@ int party_add_player(const coord_def &pos)
 
     slots.push_back(std::move(p));
     spent.push_back(0);
+    stop_auto.emplace_back();
+    notice.emplace_back();
     return slots.size() - 1;
 }
 
 void party_reset()
 {
-    ASSERT(!in_monster_phase);
+    // Not an assert: a game that ended mid monster phase (someone died)
+    // never got to clear the flag.
+    in_monster_phase = false;
     slots.clear();
     spent.clear();
+    stop_auto.clear();
+    notice.clear();
+    group_leader = -1;
+    group_kind = group_activity::none;
+    follow_target.reset();
+    follow_blocked_turns = 0;
     active = focused = 0;
 }
 
@@ -208,7 +254,99 @@ void party_spend(int aut)
     party_action_done();
 }
 
-void party_action_done()
+static bool _doing(const player &p, group_activity kind)
+{
+    switch (kind)
+    {
+    case group_activity::explore: return p.running.is_explore();
+    case group_activity::rest:    return p.running.is_rest();
+    default:                      return false;
+    }
+}
+
+static const char *_verb(group_activity kind)
+{
+    return kind == group_activity::rest ? "resting" : "exploring";
+}
+
+string party_danger_seen()
+{
+    // Solo play keeps the game's own rules (i_feel_safe etc.) untouched.
+    if (!party_active())
+        return "";
+    for (int i = 0; i < party_size(); ++i)
+    {
+        const player &p = party_member(i);
+        if (p.hp <= 0)
+            continue;
+        for (monster_near_iterator mi(p.pos(), LOS_NO_TRANS); mi; ++mi)
+        {
+            // visible_to() asserts its looker is the player in `you`, so for
+            // the others just check invisibility (their see-invisible
+            // isn't modelled yet).
+            const bool seen = i == focused ? mi->visible_to(&you)
+                                           : !mi->invisible();
+            if (mi->wont_attack() || mi->is_firewood()
+                || mons_is_always_safe(*mi) || !seen)
+            {
+                continue;
+            }
+            return make_stringf("%s can see %s", party_member_name(i).c_str(),
+                                mi->name(DESC_A).c_str());
+        }
+    }
+    return "";
+}
+
+bool party_others_need_rest()
+{
+    for (int i = 0; i < (int)slots.size(); ++i)
+    {
+        if (i == focused || slots[i]->hp <= 0)
+            continue;
+        if (!slots[i]->is_sufficiently_rested())
+            return true;
+    }
+    return false;
+}
+
+bool party_check_auto_activity()
+{
+    if (!party_active() || !you.running)
+        return false;
+    ASSERT(focused == active);
+
+    const bool exploring = you.running.is_explore();
+    const bool resting = you.running.is_rest();
+    if (!exploring && !resting)
+        return false;
+
+    // Nobody explores or rests while any of the party can see an enemy.
+    const string danger = party_danger_seen();
+    if (!danger.empty())
+    {
+        mprf(MSGCH_WARN, "%s; you stop %s.", danger.c_str(),
+             exploring ? "exploring" : "resting");
+        stop_running();
+        return true;
+    }
+
+    // A group rest keeps the leader resting while others recover (see
+    // delay.cc); once nobody needs it any more, it's over.
+    if (resting && group_kind == group_activity::rest && group_leader == active
+        // runmode counts down from RMODE_REST_DURATION (rest until healed);
+        // a plain wait starts at RMODE_WAIT_DURATION and isn't ours to stop.
+        && you.running.runmode > RMODE_WAIT_DURATION
+        && you.is_sufficiently_rested() && !party_others_need_rest())
+    {
+        mpr("The whole party is rested.");
+        stop_running();
+        return true;
+    }
+    return false;
+}
+
+void party_action_done(bool manual)
 {
     ASSERT(party_active());
     ASSERT(!in_monster_phase);
@@ -234,10 +372,60 @@ void party_action_done()
 
     spent[active] += you.time_taken;
 
+    // Exploring or resting with nobody leading: you lead, everyone else
+    // follows along. (A stopped group activity can't restart this way: the
+    // leader's is cancelled as soon as control passes to them; see stop_auto
+    // below.)
+    if (group_leader < 0 && (you.running.is_explore() || you.running.is_rest()))
+    {
+        group_kind = you.running.is_explore() ? group_activity::explore
+                                               : group_activity::rest;
+        // Messages interrupt resting: don't let this one stop the rest it
+        // announces.
+        const interrupt_block quiet;
+        if (group_kind == group_activity::explore)
+        {
+            mprf(MSGCH_PROMPT, "%s leads the party exploring.",
+                 party_member_name(active).c_str());
+        }
+        else
+        {
+            mprf(MSGCH_PROMPT, "The party rests with %s.",
+                 party_member_name(active).c_str());
+        }
+        group_leader = active;
+    }
+    if (manual)
+    {
+        group_leader = -1;
+        group_kind = group_activity::none;
+        const string why = party_member_name(active) + " is playing by hand";
+        for (int i = 0; i < (int)slots.size(); ++i)
+            if (i != active)
+                stop_auto[i] = why;
+    }
+
     const int before = active;
     advance_turn();
     if (active != before)
         party_announce_turn();
+
+    // The player now in control may have been auto-playing (e.g. exploring)
+    // while someone else played by hand. Hand them back the controls.
+    if (!stop_auto[active].empty())
+    {
+        const string why = stop_auto[active];
+        stop_auto[active].clear();
+        if (you.running)
+        {
+            mprf(MSGCH_WARN, "You stop %s: %s.",
+                 you.running.is_explore() ? "exploring"
+                 : you.running.is_rest()  ? "resting"
+                                          : "travelling",
+                 why.c_str());
+            stop_running();
+        }
+    }
 }
 
 string party_member_name(int idx)
@@ -249,14 +437,68 @@ void party_announce_turn()
 {
     if (!party_active())
         return;
-    mprf(MSGCH_PROMPT, "--- %s's turn (HP %d/%d) ---",
-         party_member_name(active).c_str(), you.hp, you.hp_max);
+    {
+        // Messages interrupt resting; this one mustn't stop a group rest's
+        // leader when control comes back to them.
+        const interrupt_block quiet;
+        mprf(MSGCH_PROMPT, "--- %s's turn (HP %d/%d) ---",
+             party_member_name(active).c_str(), you.hp, you.hp_max);
+    }
     if (!crawl_state.test)
     {
         // Status panel, map centre and LOS all belong to the new player.
         los_changed();
         redraw_screen();
     }
+}
+
+void party_share_manual(skill_type sk, int points)
+{
+    for (int i = 0; i < (int)slots.size(); ++i)
+    {
+        if (i == focused || slots[i]->hp <= 0)
+            continue;
+        player &p = *slots[i];
+        // XXX: is_useless_skill() judges the player in `you`. Party members
+        // are currently all copies of one character, so it's the same answer
+        // for everyone; revisit once players can differ (species etc).
+        if (is_useless_skill(sk) || p.skills[sk] >= MAX_SKILL_LEVEL)
+            continue;
+        p.skill_manual_points[sk] += points;
+        mprf("%s studies it too.", party_member_name(i).c_str());
+    }
+}
+
+// Skill-manual points left for player `idx` in skill `sk` (tests).
+int party_manual_points(int idx, skill_type sk)
+{
+    return party_member(idx).skill_manual_points[sk];
+}
+
+string party_member_not_adjacent()
+{
+    for (int i = 0; i < (int)slots.size(); ++i)
+    {
+        if (i == focused || slots[i]->hp <= 0)
+            continue;
+        if (grid_distance(slots[i]->pos(), you.pos()) > 1)
+            return party_member_name(i);
+    }
+    return "";
+}
+
+// Is `p` partway through taking stairs (the climb takes a turn)?
+static bool _taking_stairs(const player &p)
+{
+    for (const auto &d : p.delay_queue)
+    {
+        if (dynamic_cast<const DescendingStairsDelay*>(d.get())
+            || dynamic_cast<const AscendingStairsDelay*>(d.get()))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 int party_member_at(const coord_def &pos)
@@ -311,19 +553,77 @@ bool party_in_monster_phase()
 }
 
 // A free spot near `centre` that `who` can stand on: no monster, no player.
+// A plain closed door a teammate may be placed beyond (and which then gets
+// opened). Runed, sealed and locked doors stay shut.
+static bool _openable_door(const coord_def &c)
+{
+    const dungeon_feature_type f = env.grid(c);
+    return f == DNGN_CLOSED_DOOR || f == DNGN_CLOSED_CLEAR_DOOR;
+}
+
+// Breadth-first search by walking distance from `centre` for the nearest
+// free square `who` can stand on. If `through_doors`, plain closed doors can
+// be walked through; any on the path to the chosen square are opened, so the
+// party doesn't start shut apart by a door (e.g. arriving in a closet).
+static bool _search_spot(const coord_def &centre, const player &who,
+                         bool through_doors, coord_def &spot)
+{
+    const int max_steps = 10;
+    static FixedArray<coord_def, GXM, GYM> parent;
+    static FixedArray<int, GXM, GYM> dist;
+    parent.init(coord_def(-1, -1));
+    dist.init(-1);
+
+    vector<coord_def> queue = { centre };
+    dist(centre) = 0;
+    for (size_t head = 0; head < queue.size(); ++head)
+    {
+        const coord_def c = queue[head];
+        if (dist(c) >= max_steps)
+            continue;
+        for (adjacent_iterator ai(c); ai; ++ai)
+        {
+            const coord_def n = *ai;
+            if (!in_bounds(n) || dist(n) >= 0)
+                continue;
+            const bool door = through_doors && _openable_door(n);
+            if (!door && !who.is_habitable(n))
+                continue;
+            dist(n) = dist(c) + 1;
+            parent(n) = c;
+            queue.push_back(n);
+
+            if (door || actor_at(n) || party_member_at(n) >= 0)
+                continue;   // can pass, but not stand here
+
+            // Found it. Open any doors between here and the centre.
+            bool opened = false;
+            for (coord_def p = parent(n); p != centre; p = parent(p))
+            {
+                if (!_openable_door(p))
+                    continue;
+                set<coord_def> door_tiles;
+                find_connected_identical(p, door_tiles);
+                for (const coord_def &d : door_tiles)
+                    dgn_open_door(d);
+                opened = true;
+            }
+            if (opened)
+                los_changed();
+            spot = n;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Where to put a teammate arriving with the player at `centre`: the nearest
+// free square on foot, preferring ones that don't need a door opened.
 static bool _find_spot_near(const coord_def &centre, const player &who,
                             coord_def &spot)
 {
-    for (distance_iterator di(centre, true, true, 8); di; ++di)
-    {
-        if (!in_bounds(*di) || actor_at(*di) || party_member_at(*di) >= 0)
-            continue;
-        if (!who.is_habitable(*di) || !cell_see_cell(centre, *di, LOS_NO_TRANS))
-            continue;
-        spot = *di;
-        return true;
-    }
-    return false;
+    return _search_spot(centre, who, false, spot)
+           || _search_spot(centre, who, true, spot);
 }
 
 void party_start(int size)
@@ -397,6 +697,177 @@ bool party_swap_places_with_member_at(const coord_def &pos)
     return true;
 }
 
+bool party_blocks_travel(const coord_def &c)
+{
+    // The explorer paths straight through teammates and swaps past them
+    // (see move_player_action); otherwise a follower standing in a corridor
+    // hides everything behind them and explore wrongly says it's done. Only
+    // one player explores at a time (the rest follow), so this can't loop.
+    if (you.running.is_explore())
+        return false;
+    return party_member_at(c) >= 0 && c != follow_target;
+}
+
+int party_explore_leader()
+{
+    return group_kind == group_activity::explore ? group_leader : -1;
+}
+
+int party_rest_leader()
+{
+    return group_kind == group_activity::rest ? group_leader : -1;
+}
+
+bool party_leader_waits_for_group()
+{
+    if (!party_active() || group_kind != group_activity::explore
+        || group_leader != active || !you.running.is_explore())
+    {
+        return false;
+    }
+    ASSERT(focused == active);
+    for (int i = 0; i < (int)slots.size(); ++i)
+    {
+        if (i == active || slots[i]->hp <= 0)
+            continue;
+        if (grid_distance(slots[i]->pos(), you.pos()) > PARTY_EXPLORE_MAX_GAP)
+            return true;
+    }
+    return false;
+}
+
+// End group explore: `msg` tells the player whose turn it is; the leader (if
+// still exploring) is stopped on their next turn, told `leader_why`.
+static bool _end_group_explore(const string &msg, const string &leader_why)
+{
+    mprf(MSGCH_WARN, "%s", msg.c_str());
+    if (group_leader >= 0 && group_leader != active)
+        stop_auto[group_leader] = leader_why;
+    group_leader = -1;
+    group_kind = group_activity::none;
+    return false;
+}
+
+bool party_group_explore_turn()
+{
+    if (!party_active())
+        return false;
+    ASSERT(focused == active);
+
+    if (!notice[active].empty())
+    {
+        mprf(MSGCH_WARN, "%s", notice[active].c_str());
+        notice[active].clear();
+    }
+
+    // Someone is climbing the stairs and the whole party is about to go
+    // with them: nothing to do but wait.
+    for (int i = 0; i < (int)slots.size(); ++i)
+    {
+        if (i != active && slots[i]->hp > 0 && _taking_stairs(*slots[i]))
+        {
+            you.turn_is_over = true;
+            return true;
+        }
+    }
+    if (group_leader < 0)
+        return false;
+
+    const group_activity kind = group_kind;
+    const char *verb = _verb(kind);
+
+    // The main loop only asks us when the player is about to be prompted, so
+    // if that's the leader, their activity has stopped (item, monster, done,
+    // rested): the group activity is over.
+    if (active == group_leader)
+    {
+        for (int i = 0; i < (int)slots.size(); ++i)
+        {
+            if (i != active)
+            {
+                notice[i] = make_stringf("%s has stopped %s.",
+                                         party_member_name(active).c_str(),
+                                         verb);
+            }
+        }
+        group_leader = -1;
+        group_kind = group_activity::none;
+        return false;
+    }
+
+    const player &leader = party_member(group_leader);
+    const string lname = party_member_name(group_leader);
+
+    // The leader's activity stopped on its own. Everyone gets control back.
+    if (!_doing(leader, kind))
+    {
+        group_leader = -1;
+        group_kind = group_activity::none;
+        mprf(MSGCH_WARN, "%s has stopped %s.", lname.c_str(), verb);
+        return false;
+    }
+
+    // Anyone in the party seeing an enemy stops everyone.
+    const string danger = party_danger_seen();
+    if (!danger.empty())
+    {
+        return _end_group_explore(
+            make_stringf("%s; the party stops %s.", danger.c_str(), verb),
+            danger);
+    }
+
+    // Resting together: just wait (and regenerate) on your turns.
+    if (kind == group_activity::rest)
+    {
+        you.turn_is_over = true;
+        return true;
+    }
+
+    // Already beside the leader: wait for them to move on.
+    if (grid_distance(you.pos(), leader.pos()) <= 1)
+    {
+        you.turn_is_over = true;
+        return true;
+    }
+
+    // One step along the travel path towards the leader.
+    unwind_var<coord_def> target(follow_target, leader.pos());
+    travel_pathfind tp;
+    tp.set_src_dst(you.pos(), leader.pos());
+    const coord_def step = tp.pathfind(RMODE_TRAVEL);
+    if (step.origin() || grid_distance(step, you.pos()) != 1)
+    {
+        return _end_group_explore(make_stringf(
+            "You can't find a way to %s; the party stops exploring.",
+            lname.c_str()), party_member_name(active) + " can't reach you");
+    }
+
+    // Someone's in the way (another follower, or a monster stepped in):
+    // wait rather than swap or attack -- but not forever.
+    if (actor_at(step) || party_member_at(step) >= 0)
+    {
+        if (++follow_blocked_turns > FOLLOW_MAX_BLOCKED_TURNS)
+        {
+            follow_blocked_turns = 0;
+            return _end_group_explore(make_stringf(
+                "Something is in your way; you can't follow %s.",
+                lname.c_str()), party_member_name(active) + " is stuck");
+        }
+        you.turn_is_over = true;
+        return true;
+    }
+    follow_blocked_turns = 0;
+
+    move_player_action(step - you.pos());
+    if (!you.turn_is_over)
+    {
+        return _end_group_explore(make_stringf(
+            "You can't keep up with %s; the party stops exploring.",
+            lname.c_str()), party_member_name(active) + " can't keep up");
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Lua bindings: the `party` table (dlua). Indices are 1-based in Lua.
 // ---------------------------------------------------------------------------
@@ -464,12 +935,49 @@ LUAFN(party_lua_follow)
     return 0;
 }
 
+// 1-based index of the player leading a group rest, or 0 if none.
+LUAFN(party_lua_rest_leader)
+{
+    PLUARET(integer, party_rest_leader() + 1);
+}
+
+// "Player 2 can see a goblin", or "" if no player sees an enemy.
+LUAFN(party_lua_danger)
+{
+    PLUARET(string, party_danger_seen().c_str());
+}
+
+// 1-based index of the player leading group explore, or 0 if none.
+LUAFN(party_lua_explore_leader)
+{
+    PLUARET(integer, party_explore_leader() + 1);
+}
+
+// party.manual_points(i, skill_name): manual points player i has left.
+LUAFN(party_lua_manual_points)
+{
+    const int idx = _lua_index(ls, 1);
+    const skill_type sk = str_to_skill(luaL_checkstring(ls, 2));
+    if (sk == SK_NONE)
+        luaL_argerror(ls, 2, "unknown skill");
+    PLUARET(integer, party_manual_points(idx, sk));
+}
+
 LUAFN(party_lua_hp)
 {
     const player &p = party_member(_lua_index(ls, 1));
     lua_pushinteger(ls, p.hp);
     lua_pushinteger(ls, p.hp_max);
     return 2;
+}
+
+// party.set_hp(i, hp): for tests, e.g. to make the party need a rest.
+LUAFN(party_lua_set_hp)
+{
+    player &p = const_cast<player &>(party_member(_lua_index(ls, 1)));
+    p.hp = max(1, min((int)luaL_checkinteger(ls, 2), p.hp_max));
+    p.redraw_hit_points = true;
+    return 0;
 }
 
 LUAFN(party_lua_pos)
@@ -489,8 +997,13 @@ const struct luaL_Reg party_dlib[] =
 { "spend", party_lua_spend },
 { "reset", party_lua_reset },
 { "hp", party_lua_hp },
+{ "set_hp", party_lua_set_hp },
 { "pos", party_lua_pos },
 { "where", party_lua_where },
+{ "manual_points", party_lua_manual_points },
 { "follow", party_lua_follow },
+{ "explore_leader", party_lua_explore_leader },
+{ "rest_leader", party_lua_rest_leader },
+{ "danger", party_lua_danger },
 { nullptr, nullptr }
 };

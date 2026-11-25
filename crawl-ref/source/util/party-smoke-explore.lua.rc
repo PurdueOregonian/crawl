@@ -1,0 +1,62 @@
+<
+-- Group autoexplore on a monster-free D:1. Player 1 presses explore; player 2
+-- must follow automatically (never prompted while the party explores), stay
+-- within a few squares (the leader waits for stragglers), and never get into
+-- a swap loop with them (the explorer may swap past a follower).
+local readies = 0
+local swaps = 0
+local max_gap = 0
+local p2_start = nil
+local p2_moved = 0
+local finished = false
+local function d(code) return crawl.call_dlua(code) end
+local function log(s) crawl.stderr("SMOKE " .. s .. "\n") end
+local function finish(msg) log(msg); log("DONE"); finished = true end
+
+local function gap()
+  return d([[local x1,y1 = party.pos(1); local x2,y2 = party.pos(2)
+             return math.max(math.abs(x1-x2), math.abs(y1-y2))]])
+end
+local function p2pos() return d([[local x,y = party.pos(2); return x*1000+y]]) end
+
+function c_message(text, channel)
+  if finished then return end
+  if text:find("swap places") then
+    swaps = swaps + 1
+    if swaps > 20 then finish("FAIL swap loop: " .. swaps .. " swaps") end
+  end
+end
+
+function ready()
+  if finished then return end
+  readies = readies + 1
+  if readies == 1 then
+    d("dgn.dismiss_monsters()")
+    p2_start = p2pos()
+  else
+    -- Someone has the keyboard again, so group explore must have ended.
+    local leader = d("return party.explore_leader()")
+    if leader ~= 0 then
+      finish("FAIL player " .. d("return party.active()")
+             .. " was prompted while player " .. leader .. " leads explore")
+      return
+    end
+    local g = gap()
+    if g > max_gap then max_gap = g end
+    if p2pos() ~= p2_start then p2_moved = p2_moved + 1 end
+    log(string.format("stop %d: active=%d gap=%d swaps=%d time=%d", readies - 1,
+        d("return party.active()"), g, swaps, d("return you.time()")))
+  end
+  if readies > 8 then
+    -- Swaps are fine (the explorer may pass a follower, e.g. leaving a dead
+    -- end); a swap *loop* is the bug, and c_message catches that (>20).
+    -- The leader waits for anyone more than 2 behind; allow 1 extra for the
+    -- step the leader took on the turn explore stopped.
+    if max_gap > 3 then finish("FAIL follower fell " .. max_gap .. " squares behind")
+    elseif p2_moved == 0 then finish("FAIL player 2 never moved")
+    else finish("PASS group explore: max gap " .. max_gap .. ", " .. swaps .. " swaps, no loop") end
+    return
+  end
+  crawl.sendkeys("o")   -- whoever has the keyboard leads the next leg
+end
+>

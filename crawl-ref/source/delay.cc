@@ -52,6 +52,7 @@
 #include "options.h"
 #include "ouch.h"
 #include "output.h"
+#include "party.h"
 #include "player-equip.h"
 #include "player.h"
 #include "player-reacts.h"
@@ -1007,7 +1008,9 @@ static bool _should_stop_activity(Delay* delay,
         if ((Options.rest_wait_both && curr->is_resting()
              && !you.is_sufficiently_rested())
             || (Options.rest_wait_ancestor && curr->is_resting()
-                && !ancestor_full_hp()))
+                && !ancestor_full_hp())
+            // Group rest: keep resting until the whole party has recovered.
+            || (curr->is_resting() && party_others_need_rest()))
         {
             return false;
         }

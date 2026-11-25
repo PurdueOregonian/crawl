@@ -50,6 +50,22 @@ at(1, 12, 10, "after swap")
 assert(party.active() == 1, "turn did not return to player 1")
 assert(you.time() == t0 + 10, "round did not advance game time by 10")
 
+-- 2b. Stairs need the whole party adjacent. Player 2 is next to player 1;
+--     add a player 3 far away and try to go down.
+local sx, sy = you.pos()
+dgn.grid(sx, sy, "stone_stairs_down_i")
+party.add_player(30, 20)                 -- player 3, far away
+local t1 = you.time()
+turn(">")
+assert(party.where(1) == "D:1", "took the stairs without the whole party")
+assert(party.active() == 1, "a refused stair attempt passed the turn")
+assert(you.time() == t1, "a refused stair attempt took time")
+assert(crawl.messages(3):find("Player 3 must be next to you"),
+       "no message saying who is missing: " .. crawl.messages(3))
+party.reset()
+p2 = party.add_player(11, 10)            -- back to two, where player 2 was
+dgn.grid(sx, sy, "floor")
+
 -- 3. Level change: player 1 arrives on D:2 and the party follows.
 --    (Real stairs need a save file, which the test harness doesn't have, so
 --    jump levels the way other tests do and run the same follow step that

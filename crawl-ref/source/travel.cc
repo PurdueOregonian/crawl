@@ -52,6 +52,7 @@
 #include "nearby-danger.h"
 #include "options.h"
 #include "output.h"
+#include "party.h"
 #include "place.h"
 #include "prompt.h"
 #include "religion.h"
@@ -485,6 +486,11 @@ bool is_travelsafe_square(const coord_def& c, bool ignore_hostile,
                                   bool ignore_danger, bool try_fallback)
 {
     if (!in_bounds(c))
+        return false;
+
+    // Party members block travel like monsters do. Checked before the cache:
+    // they move every turn.
+    if (!ignore_danger && party_blocks_travel(c))
         return false;
 
     if (_travel_safe_grid)
@@ -3498,6 +3504,14 @@ void start_explore(bool grab_items, bool skip_autorest)
 
     if (!i_feel_safe(true, true))
         return;
+
+    // In a party, nobody explores while any player can see an enemy.
+    const string party_danger = party_danger_seen();
+    if (!party_danger.empty())
+    {
+        mprf(MSGCH_WARN, "%s; you can't explore now.", party_danger.c_str());
+        return;
+    }
 
     if (should_fear_zot() && !yesno("Really explore while Zot is near?", false, 'n'))
     {
