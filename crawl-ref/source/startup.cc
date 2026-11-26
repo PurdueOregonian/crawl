@@ -27,6 +27,7 @@
 #include "item-name.h"
 #include "item-prop.h"
 #include "items.h"
+#include "lan.h"
 #include "libutil.h"
 #include "loading-screen.h"
 #include "macro.h"
@@ -42,6 +43,7 @@
 #include "ng-setup.h"
 #include "notes.h"
 #include "output.h"
+#include "party.h"
 #include "player-save-info.h"
 #include "shopping.h"
 #include "skills.h"
@@ -418,9 +420,17 @@ static void _post_init(bool newc)
 
 #ifndef DGAMELAUNCH
 
+// Start menu entries that aren't game types (negative, so they don't clash
+// with game types or the save list's NUM_GAME_TYPE + n).
+enum
+{
+    MENU_LAN_HOST = -10,
+    MENU_LAN_JOIN = -11,
+};
+
 struct game_modes_menu_item
 {
-    game_type id;
+    int id;
     const char *label;
     const char *description;
 };
@@ -430,6 +440,14 @@ static const vector<game_modes_menu_item> entries =
     {GAME_TYPE_NORMAL, "Dungeon Crawl",
         "Dungeon Crawl: The main game: full of monsters, items, "
         "gods and danger!" },
+#ifdef USE_TILE_LOCAL
+    {MENU_LAN_HOST, "Host LAN Game",
+        "Start a new co-op game that other computers on your network "
+        "(or another copy of Crawl on this one) can join." },
+    {MENU_LAN_JOIN, "Join LAN Game",
+        "Join a co-op game that another computer (or another copy of "
+        "Crawl on this one) is hosting." },
+#endif
     {GAME_TYPE_CUSTOM_SEED, "Choose Game Seed",
         "Play with a chosen custom dungeon seed." },
     {GAME_TYPE_TUTORIAL, "Tutorial for Dungeon Crawl",
@@ -462,7 +480,8 @@ static void _construct_game_modes_menu(shared_ptr<OuterMenu>& container)
         auto hbox = make_shared<Box>(Box::HORZ);
         hbox->set_cross_alignment(Widget::Align::CENTER);
         auto tile = make_shared<Image>();
-        tile->set_tile(tile_def(tileidx_gametype(entry.id)));
+        tile->set_tile(tile_def(tileidx_gametype(entry.id >= 0
+            ? static_cast<game_type>(entry.id) : GAME_TYPE_NORMAL)));
         tile->set_margin_for_sdl(0, 6, 0, 0);
         hbox->add_child(std::move(tile));
         hbox->add_child(label);
@@ -750,6 +769,7 @@ private:
         case GAME_TYPE_TUTORIAL:
         case GAME_TYPE_SPRINT:
         case GAME_TYPE_HINTS:
+        case MENU_LAN_HOST:
             // If a game type is chosen, the user expects to start a new game.
             // Just blanking the name it it clashes for now.
             if (_find_save(chars, input_string) != -1)
@@ -759,6 +779,7 @@ private:
         case GAME_TYPE_ARENA:
         case GAME_TYPE_HIGH_SCORES:
         case GAME_TYPE_INSTRUCTIONS:
+        case MENU_LAN_JOIN:
             break;
 
         default:
@@ -921,6 +942,20 @@ void UIStartupMenu::on_show()
     });
 }
 
+// A message over the start menu; any key closes it.
+static void _lan_message(const string &text)
+{
+    bool done = false;
+    auto body = make_shared<Text>(formatted_string(
+        text + "\n\n[press any key]", WHITE));
+    body->set_margin_for_sdl(10);
+    auto popup = make_shared<ui::Popup>(body);
+    popup->on_keydown_event([&done](const KeyEvent&) {
+        return done = true;
+    });
+    ui::run_layout(std::move(popup), done);
+}
+
 void UIStartupMenu::menu_item_activated(int id)
 {
     switch (id)
@@ -952,6 +987,30 @@ void UIStartupMenu::menu_item_activated(int id)
 
     case GAME_TYPE_HIGH_SCORES:
         show_hiscore_table();
+        return;
+
+    case MENU_LAN_HOST:
+    {
+        trim_string(input_string);
+        if (!is_good_name(input_string, true))
+            return;
+        string err;
+        if (!lan_host_start(LAN_DEFAULT_PORT, err))
+        {
+            _lan_message(err);
+            return;
+        }
+        // The lobby (see startup_step()) shows the address and who's in.
+        ng_choice.type = GAME_TYPE_NORMAL;
+        ng_choice.name = input_string;
+        done = true;
+        return;
+    }
+
+    case MENU_LAN_JOIN:
+        lan_join_menu();
+        if (crawl_state.seen_hups)
+            done = end_game = true;
         return;
 
     default:
@@ -1098,6 +1157,13 @@ bool startup_step()
         run_arena(choice, defaults.arena_teams); // this is NORETURN
     }
 
+    // Hosting a LAN game: everyone joins before anything else happens.
+    if (lan_host_requested() && !lan_active()
+        && !lan_host_lobby(party_planned_size()))
+    {
+        game_ended(game_exit::abort);
+    }
+
     bool newchar = false;
     newgame_def ng;
     if (choice.filename.empty() && !choice.name.empty())
@@ -1113,6 +1179,9 @@ bool startup_step()
     else
     {
         clear_message_store();
+        // LAN players pick their characters too before the world is made.
+        if (lan_active())
+            party_prechoose_characters(party_planned_size());
         setup_game(ng);
         newchar = true;
         choice.seed = Options.seed; // kind of ugly, but may be changed during

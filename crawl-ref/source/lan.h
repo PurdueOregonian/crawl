@@ -1,0 +1,113 @@
+/**
+ * @file
+ * @brief LAN play for the multiplayer party: one computer hosts the game,
+ *        the other players join with a thin client.
+ *
+ * The host (start menu "Host LAN Game", or `crawl -lan-host [port]`) runs
+ * the one and only game, with a party of `party_size` players (at least
+ * 2). Player 1 plays at the host; each player after that is a "seat"
+ * played from another computer ("Join LAN Game", or
+ * `crawl -lan-join <host>[:port]`). A client is just a window: it shows
+ * the frames the host sends it and sends back its keyboard and mouse input.
+ *
+ * Every seat sees its own player. Whoever's turn it is gets the live screen
+ * (menus, prompts and all) and their input is used; everyone else's window
+ * is refreshed between actions with their own player's view (the host swaps
+ * that player into `you`, draws the screen, and sends or shows the frame).
+ *
+ * Local tiles only: frames are read back from the GL window.
+ */
+
+#pragma once
+
+#include <cstdint>
+#include <string>
+
+using std::string;
+
+const int LAN_DEFAULT_PORT = 31337;
+
+// Command line.
+void lan_request_host(int port);
+void lan_request_join(const string &address);   // host[:port]
+bool lan_host_requested();
+bool lan_join_requested();
+// Client test helpers: keys to type on our turns, and where to save the
+// frames we're shown (as BMP).
+void lan_set_client_script(const string &keys);
+void lan_set_client_dump(const string &path);
+
+// Start menu "Host LAN Game": host on `port` and start listening right
+// away, so other computers can connect while player 1 is being made.
+// False (with the reason in `err`) if that's impossible.
+bool lan_host_start(int port, string &err);
+// This computer's addresses, for telling the other players ("" if unknown).
+string lan_host_addresses();
+// Before a hosted game starts: show who's joined and wait until each of
+// party members 2..`players` has a computer (or the host starts anyway).
+// False if the host gave up hosting.
+bool lan_host_lobby(int players);
+// Stop hosting: drop everyone and stop listening.
+void lan_host_stop();
+
+// Start menu "Join LAN Game": ask for the host's address, then join.
+void lan_join_menu();
+
+// Be a window onto the game hosted at `address` (host[:port]) until the
+// host goes away, the player cancels, or the window is closed. Runs in the
+// game window, so it needs tiles.initialise() first.
+void lan_run_client(const string &address);
+// The address given with -lan-join.
+const string &lan_join_address();
+
+// Host: wait for the computer that plays party member `idx` (index from 0;
+// player 1 is local, so idx >= 1) to connect. False if the host gave up
+// waiting (that player is then played at the host, as in hotseat).
+bool lan_host_wait_for_player(int idx);
+
+// Is any remote seat connected?
+bool lan_active();
+
+// Seat that plays party member `idx`: 0 for the host's own screen, k > 0
+// for the k-th remote computer.
+int lan_seat_of_player(int idx);
+
+// The seat that gets frames and input right now.
+int lan_output_seat();
+
+// While alive, frames and input go to `seat` (e.g. a joining player's
+// character choice, or drawing an idle player's view).
+class lan_seat_scope
+{
+public:
+    explicit lan_seat_scope(int seat);
+    ~lan_seat_scope();
+private:
+    int prev;
+};
+
+// Draw each idle seat's own view and send/show it. `force`: even if one
+// was just drawn (otherwise at most a few times a second). Call only
+// between actions: it swaps other players into `you`.
+void lan_refresh_idle_views(bool force);
+
+#ifdef USE_TILE_LOCAL
+struct SDL_Window;
+union SDL_Event;
+
+// The SDL window wrapper's hooks.
+void lan_set_window(SDL_Window *window);
+// A frame has been drawn into the back buffer. True if it was for a remote
+// seat (and has been sent); then it mustn't be shown locally.
+bool lan_present();
+// Replacement for SDL_WaitEventTimeout(): input comes from the output seat.
+bool lan_wait_event(SDL_Event &event, int timeout);
+// Is the output seat remote? (Then local input is ignored.)
+bool lan_routing_remote();
+// Does the output seat have a queued event of this SDL type?
+bool lan_peek_remote(uint32_t sdl_type);
+// If the output seat is remote: its mouse position (window coordinates),
+// SDL button mask and SDL modifier keys, as of its last input. The UI must
+// use these, not this computer's mouse and keyboard.
+bool lan_remote_input(int &x, int &y, uint32_t &buttons, uint16_t &mod);
+#endif

@@ -21,13 +21,18 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 
 #include "coord-def.h"
+#include "god-type.h"
 #include "skill-type.h"
 #include "spell-type.h"
 
 #include <vector>
+
+enum class passive_t;
+struct item_def;
 
 class monster;
 struct newgame_def;
@@ -72,6 +77,16 @@ int party_revive_progress(int idx);
 // menus (backing out gives a copy of the current player); otherwise they're
 // all copies. Used at game start when the party_size option is > 1.
 void party_start(int size, bool choose = false);
+
+// How many players a new game's party will have: party_size, and at least 2
+// when hosting a LAN game.
+int party_planned_size();
+
+// LAN play, a new game, before the world is made: each player at another
+// computer picks their character there now (party_start() then uses it),
+// so everyone is ready before the game starts. Players at this computer
+// still pick theirs in party_start().
+void party_prechoose_characters(int size);
 
 // Add a player at `pos` playing the character described by `ng` (species,
 // job, weapon). World state and level come from the current player.
@@ -123,14 +138,29 @@ bool party_check_auto_activity();
 // Should travel/explore pathing treat `c` as blocked by a party member?
 bool party_blocks_travel(const coord_def &c);
 
+// May the player in `you`, while exploring or travelling, swap places with a
+// teammate in their way? Yes for the group's leader (or a would-be one).
+bool party_may_swap_while_travelling();
+
+// Put an item into the party's shared pack (the inventory of the player in
+// `you`): stacking it, keeping its letter if free, else on the floor.
+void party_add_to_pack(const item_def &item);
+
 // "--- Player 2's turn ---", plus a full redraw for the new player.
 void party_announce_turn();
+// Announce the active player unless they were the last one announced. Called
+// when a player is about to be prompted for a command.
+void party_announce_if_new();
 
 string party_member_name(int idx);
 
 // A skill manual picked up by the player in `you` teaches every other living
 // party member who can still learn that skill, as if they'd picked it up too.
 void party_share_manual(skill_type sk, int points);
+
+// Experience gained by the player in `you` (a kill, an XP potion, ...):
+// every other living party member gains the same amount.
+void party_share_exp(unsigned int exp);
 
 // A spellbook/parchment picked up by the player in `you`: every other living
 // party member who has a spell library (not innate casters such as djinn)
@@ -154,6 +184,27 @@ void party_follow_to_current_level();
 // summons...). Party members are like permanent allies in this respect.
 void party_make_room_at(const coord_def &pos);
 
+// Teleportation is shared by the party. party_share_teleport(): the player in
+// `you` just started a delayed teleport; give everyone the same countdown.
+// party_cancel_teleport(): it was cancelled; cancel it for everyone.
+// party_teleport_along(): the player in `you` just teleported; clear the
+// others' countdowns and bring them along to land beside them.
+void party_share_teleport();
+// Which god (if any) grants `passive` to the player in `you` or to a living
+// teammate on this level, e.g. Ashenzari's warning of malevolent traps
+// protects the whole party. GOD_NO_GOD if nobody's does.
+god_type party_passive_god(passive_t passive);
+void party_cancel_teleport();
+void party_teleport_along();
+
+// The Abyss moved the area within `radius` of `old_centre` (where the player
+// in `you` was) by `delta`. Teammates in it move with it; anyone else is
+// brought to the player's side.
+void party_abyss_shifted(const coord_def &old_centre, const coord_def &delta,
+                         int radius);
+// The Abyss's terrain just changed: move teammates off walls or lava.
+void party_abyss_morphed();
+
 // Move party member `idx` (not the one in `you`) directly to `pos` (tests).
 void party_member_set_pos(int idx, const coord_def &pos);
 
@@ -164,10 +215,19 @@ bool party_swap_places_with_member_at(const coord_def &pos);
 // True when there is more than one player.
 bool party_active();
 int party_size();
+// How many players' worth of loot (random floor items, shops) a new level
+// gets. Also counts the configured party_size, because the first level is
+// made before the party is.
+int party_loot_scale();
 
 // 0-based indices.
 int party_active_index();
 int party_focused_index();
+
+// Run `fn` with party member `idx` in `you` (their view, LOS, status), then
+// put back whoever was there. Only between actions: nothing may be holding
+// references into `you`.
+void party_view_as(int idx, const function<void()> &fn);
 
 // Add a new player, cloned from the active one, standing at `pos`.
 // Returns its index.

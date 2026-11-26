@@ -58,6 +58,7 @@
 #include "mon-poly.h"
 #include "nearby-danger.h"
 #include "notes.h"
+#include "party.h"
 #include "place.h"
 #include "randbook.h"
 #include "random.h"
@@ -100,6 +101,7 @@ static void _builder_monsters();
 static coord_def _place_specific_feature(dungeon_feature_type feat);
 static void _place_branch_entrances(bool use_vaults);
 static void _place_extra_vaults();
+static void _place_party_shops();
 static void _place_chance_vaults();
 static void _place_minivaults();
 static int _place_uniques();
@@ -2901,6 +2903,7 @@ static void _build_dungeon_level()
             _place_chance_vaults();
             _place_minivaults();
             _place_extra_vaults();
+            _place_party_shops();
         }
         else
         {
@@ -4160,6 +4163,25 @@ static void _place_branch_entrances(bool use_vaults)
     }
 }
 
+// A party gets a level's worth of shops per player: top up whatever shops
+// the level's vaults made with generic shop minivaults.
+static void _place_party_shops()
+{
+    const int scale = party_loot_scale();
+    if (scale <= 1 || env.shop.empty())
+        return;
+
+    const int want = env.shop.size() * scale;
+    for (int tries = 0; (int)env.shop.size() < want && tries < want * 3;
+         ++tries)
+    {
+        const map_def *vault = random_map_for_tag("shop");
+        if (!vault)
+            return;
+        dgn_safe_place_map(vault, true, false);
+    }
+}
+
 static void _place_extra_vaults()
 {
     int tries = 0;
@@ -4488,7 +4510,9 @@ static void _builder_items()
     int i = 0;
     object_class_type specif_type = OBJ_RANDOM;
     int items_levels = env.absdepth0;
-    int items_wanted = _num_items_wanted(items_levels);
+    // Each player in a party gets a level's worth of random items (and so
+    // of randarts, which are a share of them).
+    int items_wanted = _num_items_wanted(items_levels) * party_loot_scale();
 
     if (player_in_branch(BRANCH_VAULTS))
     {

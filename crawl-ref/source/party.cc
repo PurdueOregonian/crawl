@@ -8,15 +8,18 @@
 #include "party.h"
 
 #include <climits>
+#include <map>
 #include <memory>
 #include <vector>
 
 #include "abyss.h"
 #include "act-iter.h"
+#include "beam.h"
 #include "cluautil.h"
 #include "coord.h"
 #include "coordit.h"
 #include "delay.h"
+#include "god-passive.h"
 #include "env.h"
 #include "fineff.h"
 #include "initfile.h"
@@ -32,7 +35,11 @@
 #include "ng-setup.h"
 #include "species.h"
 #include "jobs.h"
+#include "lan.h"
 #include "item-prop.h"
+#include "item-use.h"
+#include "items.h"
+#include "prompt.h"
 #include "movement.h"
 #include "nearby-danger.h"
 #include "unwind.h"
@@ -49,6 +56,7 @@
 #include "stringutil.h"
 #include "terrain.h"
 #include "transform.h"
+#include "traps.h"
 #include "travel.h"
 #include "viewgeom.h"
 #ifdef USE_TILE
@@ -104,7 +112,9 @@ namespace
     // Group activity (explore or rest): index of the player leading it, or
     // -1. Everyone else follows along automatically on their turns.
     int group_leader = -1;
-    enum class group_activity { none, explore, rest };
+    // travel: G / Ctrl+G / map travel, across levels too; like explore,
+    // the others follow and the leader takes the whole party down stairs.
+    enum class group_activity { none, explore, travel, rest };
     group_activity group_kind = group_activity::none;
     // While a follower is pathing to the leader, the leader's square must
     // not count as blocked (party members otherwise block travel).
@@ -116,10 +126,120 @@ namespace
     int active = 0;
     int focused = 0;
     bool in_monster_phase = false;
+    // The last player told "--- Player N's turn ---". Control can pass many
+    // times without anyone typing (resting together, following an explore,
+    // a multi-turn action); only the player about to be asked for a command
+    // is announced, so those turns don't flood messages and redraws.
+    int announced = -1;
 
+    // Shared pack. Everything nobody is wearing or wielding belongs to the
+    // whole party and travels with control: it's in the inventory of the
+    // player in `you`. Each parked player keeps only what they have on.
+    bool worn_by(const player &p, int slot)
+    {
+        for (const player_equip_entry &e : p.equipment.items)
+            if (e.item == slot)
+                return true;
+        return false;
+    }
+
+    bool worn_by_parked(int slot)
+    {
+        for (int i = 0; i < (int)slots.size(); ++i)
+            if (i != focused && worn_by(*slots[i], slot))
+                return true;
+        return false;
+    }
+
+    // Take the unworn items out of `you`, with the slots they were in.
+    vector<item_def> take_pack()
+    {
+        vector<item_def> pack;
+        for (int i = 0; i < ENDOFPACK; ++i)
+        {
+            item_def &item = you.inv[i];
+            if (item.defined() && !worn_by(you, i))
+            {
+                pack.push_back(item);
+                item.clear();
+            }
+        }
+        return pack;
+    }
+}
+
+void party_add_to_pack(const item_def &item_in)
+{
+    item_def item = item_in;
+    // Stack it with a matching pack item (two players' potions of curing).
+    if (is_stackable_item(item))
+    {
+        for (int i = 0; i < ENDOFPACK; ++i)
+        {
+            item_def &other = you.inv[i];
+            if (other.defined() && !worn_by(you, i) && items_stack(other, item))
+            {
+                other.quantity += item.quantity;
+                return;
+            }
+        }
+    }
+    // Gear (index = letter, a..Z) and consumables (their own letters) have
+    // separate halves of the pack. Keep its place if that's free; otherwise
+    // prefer gear slots no parked player has their own gear in, so it won't
+    // need to move again.
+    const bool gear = inventory_category_for(item) == INVENT_GEAR;
+    const int lo = gear ? 0 : MAX_GEAR;
+    const int hi = gear ? MAX_GEAR : ENDOFPACK;
+    int slot = item.link;
+    if (slot < lo || slot >= hi || you.inv[slot].defined())
+    {
+        slot = -1;
+        for (int pass = 0; pass < 2 && slot < 0; ++pass)
+            for (int i = lo; i < hi && slot < 0; ++i)
+                if (!you.inv[i].defined()
+                    && (pass || !gear || !worn_by_parked(i)))
+                {
+                    slot = i;
+                }
+    }
+    if (slot < 0)
+    {
+        // A full pack: it lands at the feet of the player whose turn it is.
+        mprf("There's no room in the pack for %s; it falls to the floor.",
+             item.name(DESC_THE).c_str());
+        copy_item_to_grid(item, you.pos());
+        return;
+    }
+    item.pos = ITEM_IN_INVENTORY;
+    item.link = slot;
+    if (gear)
+        item.slot = index_to_letter(slot);
+    you.inv[slot] = item;
+    if (!gear)
+    {
+        // Two consumables used the same way can't share a letter (e.g. both
+        // players' first potion was 'a'): give this one another.
+        item_def &placed = you.inv[slot];
+        const operation_types oper = item_to_oper(&placed);
+        for (int i = MAX_GEAR; i < ENDOFPACK; ++i)
+            if (i != slot && you.inv[i].defined()
+                && you.inv[i].slot == placed.slot
+                && item_to_oper(&you.inv[i]) == oper)
+            {
+                reassign_consumable_letter(placed);
+                break;
+            }
+    }
+}
+
+namespace
+{
     // Put player `idx` into `you`, parking whoever was there in their slot.
     // The save file handle belongs to the game, not to a player, so it stays
     // with the global `you` (and ~player asserts that copies don't own it).
+    // The shared pack, what everyone has identified and the runes and gems
+    // anyone has collected carry over to them.
     void swap_in(int idx)
     {
         ASSERT(idx >= 0 && idx < (int)slots.size());
@@ -130,12 +250,38 @@ namespace
         base_dolls[focused] = player_doll;
         dolls[focused] = current_full_doll();
 #endif
+        const vector<item_def> pack = take_pack();
+        const id_arr known = you.type_ids;
+        const FixedBitVector<NUM_RUNE_TYPES> runes = you.runes;
+        const FixedBitVector<NUM_GEM_TYPES> gems = you.gems_found;
+        const FixedBitVector<NUM_GEM_TYPES> shattered = you.gems_shattered;
+        const FixedVector<int, NUM_GEM_TYPES> gem_time = you.gem_time_spent;
         package *save = you.save;
         you.save = nullptr;
         swap(you, *slots[focused]);   // park the focused player
         swap(you, *slots[idx]);       // bring in the new one
         you.save = save;
         focused = idx;
+
+        for (const item_def &item : pack)
+            party_add_to_pack(item);
+        for (int c = 0; c < NUM_OBJECT_CLASSES; ++c)
+            for (int t = 0; t < MAX_SUBTYPES; ++t)
+                if (known[c][t])
+                    you.type_ids[c][t] = true;
+        for (int r = 0; r < NUM_RUNE_TYPES; ++r)
+            if (runes[r])
+                you.runes.set(r);
+        // Gems' clock is the party's (it ticks once per round, on whoever is
+        // in `you`), so the newcomer takes the larger count.
+        for (int g = 0; g < NUM_GEM_TYPES; ++g)
+        {
+            if (gems[g])
+                you.gems_found.set(g);
+            if (shattered[g])
+                you.gems_shattered.set(g);
+            you.gem_time_spent[g] = max(you.gem_time_spent[g], gem_time[g]);
+        }
 #ifdef USE_TILE
         player_doll = base_dolls[idx];
 #endif
@@ -211,6 +357,12 @@ int party_size()
     return slots.empty() ? 1 : slots.size();
 }
 
+int party_loot_scale()
+{
+    return max({party_size(), Options.party_size,
+                lan_host_requested() ? 2 : 1});
+}
+
 int party_active_index()
 {
     return active;
@@ -219,6 +371,23 @@ int party_active_index()
 int party_focused_index()
 {
     return focused;
+}
+
+void party_view_as(int idx, const function<void()> &fn)
+{
+    if (slots.empty() || idx == focused)
+    {
+        fn();
+        return;
+    }
+    ASSERT(!in_monster_phase);
+    const int prev = focused;
+    swap_in(idx);
+    // Their LOS and map view, not the previous player's.
+    los_changed();
+    fn();
+    swap_in(prev);
+    los_changed();
 }
 
 const player &party_member(int idx)
@@ -252,6 +421,10 @@ int party_add_player(const coord_def &pos)
     auto p = make_unique<player>(you);
     p->save = nullptr;
     p->delay_queue.clear();
+    // A copy of you gets copies of your gear, but not of the shared pack.
+    for (int i = 0; i < ENDOFPACK; ++i)
+        if (p->inv[i].defined() && !worn_by(*p, i))
+            p->inv[i].clear();
     p->flash_where = nullptr;
     // Direct assignment, not set_position(): this player isn't the one in
     // `you`, so don't fire "player moved" events or touch LOS.
@@ -290,6 +463,7 @@ void party_reset()
     follow_target.reset();
     follow_blocked_turns = 0;
     active = focused = 0;
+    announced = -1;
 }
 
 void party_switch_to(int idx)
@@ -461,6 +635,8 @@ static bool _doing(const player &p, group_activity kind)
     switch (kind)
     {
     case group_activity::explore: return p.running.is_explore();
+    case group_activity::travel:
+        return p.running.is_any_travel() && !p.running.is_explore();
     case group_activity::rest:    return p.running.is_rest();
     default:                      return false;
     }
@@ -468,7 +644,9 @@ static bool _doing(const player &p, group_activity kind)
 
 static const char *_verb(group_activity kind)
 {
-    return kind == group_activity::rest ? "resting" : "exploring";
+    return kind == group_activity::rest     ? "resting"
+         : kind == group_activity::travel   ? "travelling"
+                                            : "exploring";
 }
 
 string party_danger_seen()
@@ -583,17 +761,19 @@ void party_action_done(bool manual)
     // follows along. (A stopped group activity can't restart this way: the
     // leader's is cancelled as soon as control passes to them; see stop_auto
     // below.)
-    if (group_leader < 0 && (you.running.is_explore() || you.running.is_rest()))
+    if (group_leader < 0
+        && (you.running.is_any_travel() || you.running.is_rest()))
     {
-        group_kind = you.running.is_explore() ? group_activity::explore
-                                               : group_activity::rest;
+        group_kind = you.running.is_explore()    ? group_activity::explore
+                   : you.running.is_any_travel() ? group_activity::travel
+                                                 : group_activity::rest;
         // Messages interrupt resting: don't let this one stop the rest it
         // announces.
         const interrupt_block quiet;
-        if (group_kind == group_activity::explore)
+        if (group_kind != group_activity::rest)
         {
-            mprf(MSGCH_PROMPT, "%s leads the party exploring.",
-                 party_member_name(active).c_str());
+            mprf(MSGCH_PROMPT, "%s leads the party %s.",
+                 party_member_name(active).c_str(), _verb(group_kind));
         }
         else
         {
@@ -614,8 +794,8 @@ void party_action_done(bool manual)
 
     const int before = active;
     advance_turn();
-    if (active != before)
-        party_announce_turn();
+    if (active != before && !crawl_state.test)
+        los_changed();  // the next player's view; announced when prompted
 
     // The player now in control may have been auto-playing (e.g. exploring)
     // while someone else played by hand. Hand them back the controls.
@@ -633,6 +813,10 @@ void party_action_done(bool manual)
             stop_running();
         }
     }
+
+    // LAN play: keep the other players' screens up to date while this one
+    // acts (a few times a second at most; see lan_refresh_idle_views).
+    lan_refresh_idle_views(false);
 }
 
 string party_member_name(int idx)
@@ -644,6 +828,7 @@ void party_announce_turn()
 {
     if (!party_active())
         return;
+    announced = active;
     {
         // Messages interrupt resting; this one mustn't stop a group rest's
         // leader when control comes back to them.
@@ -657,6 +842,12 @@ void party_announce_turn()
         los_changed();
         redraw_screen();
     }
+}
+
+void party_announce_if_new()
+{
+    if (party_active() && announced != active)
+        party_announce_turn();
 }
 
 void party_share_manual(skill_type sk, int points)
@@ -673,6 +864,19 @@ void party_share_manual(skill_type sk, int points)
             continue;
         p.skill_manual_points[sk] += points;
         mprf("%s studies it too.", party_member_name(i).c_str());
+    }
+}
+
+void party_share_exp(unsigned int exp)
+{
+    // Each living teammate gets the same amount into their pool; it's
+    // applied (levels, skill training, xp-gated timers) by apply_exp() at
+    // the start of their own next turn, as for the player in `you`.
+    for (int i = 0; i < (int)slots.size(); ++i)
+    {
+        if (i == focused || slots[i]->hp <= 0 || slots[i]->pending_revival)
+            continue;
+        slots[i]->experience_pool += exp;
     }
 }
 
@@ -915,6 +1119,41 @@ int party_add_character(const coord_def &pos, const newgame_def &ng)
     return idx;
 }
 
+namespace
+{
+    // Characters picked before the world was made, by party index; `chosen`
+    // false means they backed out (and join as a copy).
+    struct prechoice
+    {
+        bool chosen = false;
+        newgame_def ng;
+    };
+    std::map<int, prechoice> prechosen;
+}
+
+int party_planned_size()
+{
+    return lan_host_requested() ? max(Options.party_size, 2)
+                                : Options.party_size;
+}
+
+void party_prechoose_characters(int size)
+{
+    prechosen.clear();
+    if (!Options.party_choose_characters)
+        return;
+    size = min(size, PARTY_MAX_SIZE);
+    for (int idx = 1; idx < size; ++idx)
+    {
+        const int seat = lan_seat_of_player(idx);
+        if (seat <= 0)
+            continue;
+        lan_seat_scope scope(seat);
+        prechoice &pc = prechosen[idx];
+        pc.chosen = choose_party_member(pc.ng, party_member_name(idx));
+    }
+}
+
 void party_start(int size, bool choose)
 {
     ASSERT(!in_monster_phase);
@@ -928,16 +1167,34 @@ void party_start(int size, bool choose)
             mprf(MSGCH_ERROR, "No room for %s to join!", name.c_str());
             break;
         }
+        // LAN play: this player is at another computer; wait for it, and
+        // show them their character choice.
+        const int idx = party_size();
+        if (lan_host_requested())
+            lan_host_wait_for_player(idx);
         newgame_def ng;
-        if (choose && choose_party_member(ng, name))
+        bool chosen = false;
+        const auto pre = prechosen.find(idx);
+        if (pre != prechosen.end())
+        {
+            chosen = pre->second.chosen;
+            ng = pre->second.ng;
+        }
+        else if (choose)
+        {
+            lan_seat_scope seat(lan_seat_of_player(idx));
+            chosen = choose_party_member(ng, name);
+        }
+        if (chosen)
             party_add_character(spot, ng);
         else
         {
-            if (choose)
+            if (choose || pre != prechosen.end())
                 mprf("%s joins as a copy of you.", name.c_str());
             party_add_player(spot);
         }
     }
+    prechosen.clear();
     if (party_active())
     {
         mprf(MSGCH_PROMPT, "A party of %d sets out. Players act in turn; "
@@ -974,6 +1231,203 @@ void party_follow_to_current_level()
                     break;
                 }
         }
+    }
+}
+
+// Teleportation is one status for the whole party: everyone gets the same
+// countdown, cancelling it cancels it for all, and when it goes off (for
+// whoever acts first) everyone lands together.
+static bool _teleports_with_party(int i)
+{
+    return i != focused && slots[i]->hp > 0 && !slots[i]->pending_revival
+           && _here(*slots[i]);
+}
+
+// Can party member `p` (not in `you`) be teleported right now? Mirrors
+// player::no_tele(), which can't be asked of `p` directly: its item check
+// reads the global `you`'s equipment. Level-wide bans (Sprint, the Gauntlet)
+// apply to everyone alike, so the player in `you` was already stopped.
+static bool _member_can_teleport(const player &p)
+{
+    return !p.stasis()
+           && !p.duration[DUR_DIMENSION_ANCHOR]
+           && p.form != transformation::tree
+           && !p.equipment.get_artprop(ARTP_PREVENT_TELEPORTATION);
+}
+
+void party_share_teleport()
+{
+    if (!party_active())
+        return;
+    bool any = false;
+    for (int i = 0; i < (int)slots.size(); ++i)
+    {
+        if (!_teleports_with_party(i))
+            continue;
+        player &p = *slots[i];
+        // A teammate who can't teleport (formicid stasis, -Tele, a dimension
+        // anchor, tree form) is left out of it and stays where they are.
+        if (!_member_can_teleport(p))
+        {
+            mprf("%s is held fast in space.", party_member_name(i).c_str());
+            continue;
+        }
+        p.duration[DUR_TELEPORT] = you.duration[DUR_TELEPORT];
+        if (you.props.exists(TELEPORTITIS_SOURCE))
+            p.props[TELEPORTITIS_SOURCE] = you.props[TELEPORTITIS_SOURCE];
+        else
+            p.props.erase(TELEPORTITIS_SOURCE);
+        any = true;
+    }
+    if (any)
+        mpr("Space destabilises around the whole party.");
+}
+
+god_type party_passive_god(passive_t passive)
+{
+    if (have_passive(passive))
+        return you.religion;
+    for (int i = 0; i < (int)slots.size(); ++i)
+    {
+        if (i == focused)
+            continue;
+        const player &p = *slots[i];
+        if (p.hp > 0 && !p.pending_revival && _here(p)
+            && player_has_passive(p, passive))
+        {
+            return p.religion;
+        }
+    }
+    return GOD_NO_GOD;
+}
+
+void party_cancel_teleport()
+{
+    for (int i = 0; i < (int)slots.size(); ++i)
+    {
+        if (i == focused)
+            continue;
+        slots[i]->duration[DUR_TELEPORT] = 0;
+        slots[i]->props.erase(TELEPORTITIS_SOURCE);
+    }
+}
+
+void party_teleport_along()
+{
+    if (!party_active())
+        return;
+    party_cancel_teleport();
+    // In the Abyss a teleport makes a new area: the old coordinates mean
+    // nothing, so a fallen player's body comes along too.
+    const bool abyss = player_in_branch(BRANCH_ABYSS);
+    for (int i = 0; i < (int)slots.size(); ++i)
+    {
+        if (i == focused || !_here(*slots[i]))
+            continue;
+        if (!abyss && !_teleports_with_party(i))
+            continue;
+        player &p = *slots[i];
+        // Anyone who can't teleport stays behind -- except in the Abyss,
+        // where a teleport makes a whole new area and nobody can be left in
+        // the old one.
+        if (!abyss && !_member_can_teleport(p))
+        {
+            mprf("%s stays behind, held fast in space.",
+                 party_member_name(i).c_str());
+            continue;
+        }
+        // Already brought along (some paths, e.g. a teleport in the Abyss,
+        // pass through here twice) or happened to land close anyway.
+        if (in_bounds(p.pos()) && grid_distance(p.pos(), you.pos()) <= 2
+            && p.is_habitable(p.pos()) && !actor_at(p.pos()))
+        {
+            continue;
+        }
+        p.position.reset();     // don't block our own placement
+        coord_def spot;
+        if (_find_spot_near(you.pos(), p, spot))
+        {
+            p.position = spot;
+            mprf("%s is pulled through space with you.",
+                 party_member_name(i).c_str());
+        }
+        else
+        {
+            for (rectangle_iterator ri(1); ri; ++ri)
+                if (!actor_at(*ri) && party_member_at(*ri) < 0
+                    && p.is_habitable(*ri))
+                {
+                    p.position = *ri;
+                    break;
+                }
+        }
+    }
+}
+
+// Put party member `i` (not in `you`) on the nearest free square to
+// `centre` they can stand on, or anywhere passable as a last resort.
+static void _place_member_near(int i, const coord_def &centre)
+{
+    player &p = *slots[i];
+    p.position.reset();     // don't block our own placement
+    coord_def spot;
+    // Failing that (e.g. `centre` is deep inside solid rock), next to the
+    // player in `you`, and only then anywhere at all.
+    if (_find_spot_near(centre, p, spot)
+        || centre != you.pos() && _find_spot_near(you.pos(), p, spot))
+    {
+        p.position = spot;
+        return;
+    }
+    for (rectangle_iterator ri(1); ri; ++ri)
+        if (!actor_at(*ri) && party_member_at(*ri) < 0 && p.is_habitable(*ri))
+        {
+            p.position = *ri;
+            return;
+        }
+}
+
+static bool _member_square_ok(const player &p)
+{
+    return in_bounds(p.pos()) && p.is_habitable(p.pos()) && !actor_at(p.pos());
+}
+
+void party_abyss_shifted(const coord_def &old_centre, const coord_def &delta,
+                         int radius)
+{
+    if (!party_active())
+        return;
+    for (int i = 0; i < (int)slots.size(); ++i)
+    {
+        if (i == focused || !_here(*slots[i]))
+            continue;
+        player &p = *slots[i];
+        // The area around the player moved with them; so did anyone in it.
+        // Anyone further out (or left somewhere unusable) is brought along.
+        if (in_bounds(p.pos()) && (p.pos() - old_centre).rdist() <= radius)
+            p.position += delta;
+        if (!_member_square_ok(p) || grid_distance(p.pos(), you.pos()) > radius)
+            _place_member_near(i, you.pos());
+    }
+}
+
+void party_abyss_morphed()
+{
+    if (!party_active())
+        return;
+    // The terrain changes underfoot; a teammate it walled in or left over
+    // lava steps to the nearest safe square, as the player in `you` does.
+    for (int i = 0; i < (int)slots.size(); ++i)
+    {
+        if (i == focused || !_here(*slots[i]))
+            continue;
+        player &p = *slots[i];
+        if (in_bounds(p.pos()) && p.is_habitable(p.pos())
+            && !is_feat_dangerous(env.grid(p.pos())))
+        {
+            continue;
+        }
+        _place_member_near(i, in_bounds(p.pos()) ? p.pos() : you.pos());
     }
 }
 
@@ -1025,9 +1479,17 @@ bool party_blocks_travel(const coord_def &c)
     // (see move_player_action); otherwise a follower standing in a corridor
     // hides everything behind them and explore wrongly says it's done. Only
     // one player explores at a time (the rest follow), so this can't loop.
-    if (you.running.is_explore())
+    if (you.running.is_any_travel() && party_may_swap_while_travelling())
         return false;
     return party_member_at(c) >= 0 && c != follow_target;
+}
+
+bool party_may_swap_while_travelling()
+{
+    // The group's leader (or someone about to become it) walks through the
+    // followers. Anyone else travelling while another player leads could
+    // swap back and forth with them forever.
+    return !party_active() || group_leader < 0 || group_leader == active;
 }
 
 int party_explore_leader()
@@ -1042,17 +1504,26 @@ int party_rest_leader()
 
 bool party_leader_waits_for_group()
 {
-    if (!party_active() || group_kind != group_activity::explore
-        || group_leader != active || !you.running.is_explore())
+    if (!party_active()
+        || group_kind != group_activity::explore
+           && group_kind != group_activity::travel
+        || group_leader != active || !_doing(you, group_kind))
     {
         return false;
     }
     ASSERT(focused == active);
+    // Everyone must be adjacent to change level, so on the stairs the
+    // travel leader waits until they are. (Travel only stops on stairs it is
+    // about to take: its route ends there or goes through them.)
+    const bool on_stairs = group_kind == group_activity::travel
+                           && feat_is_travelable_stair(env.grid(you.pos()))
+                           && you.running.pos == you.pos();
+    const int gap = on_stairs ? 1 : PARTY_EXPLORE_MAX_GAP;
     for (int i = 0; i < (int)slots.size(); ++i)
     {
         if (i == active || slots[i]->hp <= 0)
             continue;
-        if (grid_distance(slots[i]->pos(), you.pos()) > PARTY_EXPLORE_MAX_GAP)
+        if (grid_distance(slots[i]->pos(), you.pos()) > gap)
             return true;
     }
     return false;
@@ -1163,8 +1634,8 @@ bool party_group_explore_turn()
     if (step.origin() || grid_distance(step, you.pos()) != 1)
     {
         return _end_group_explore(make_stringf(
-            "You can't find a way to %s; the party stops exploring.",
-            lname.c_str()), party_member_name(active) + " can't reach you");
+            "You can't find a way to %s; the party stops %s.",
+            lname.c_str(), verb), party_member_name(active) + " can't reach you");
     }
 
     // Someone's in the way (another follower, or a monster stepped in):
@@ -1187,8 +1658,8 @@ bool party_group_explore_turn()
     if (!you.turn_is_over)
     {
         return _end_group_explore(make_stringf(
-            "You can't keep up with %s; the party stops exploring.",
-            lname.c_str()), party_member_name(active) + " can't keep up");
+            "You can't keep up with %s; the party stops %s.",
+            lname.c_str(), verb), party_member_name(active) + " can't keep up");
     }
     return true;
 }
@@ -1208,6 +1679,10 @@ static int _lua_index(lua_State *ls, int arg)
 LUAFN(party_lua_size)
 {
     PLUARET(integer, party_size());
+}
+LUAFN(party_lua_loot_scale)
+{
+    PLUARET(integer, party_loot_scale());
 }
 
 LUAFN(party_lua_active)
@@ -1322,6 +1797,55 @@ LUAFN(party_lua_manual_points)
     PLUARET(integer, party_manual_points(idx, sk));
 }
 
+// party.xp(i): player i's experience level and their total experience
+// (including what's pooled, not yet applied).
+LUAFN(party_lua_xp)
+{
+    const player &p = party_member(_lua_index(ls, 1));
+    lua_pushinteger(ls, p.experience_level);
+    lua_pushinteger(ls, p.experience + p.experience_pool);
+    return 2;
+}
+
+// party.teleporting(i): player i's delayed teleport countdown (0 if none).
+LUAFN(party_lua_teleporting)
+{
+    PLUARET(integer,
+            party_member(_lua_index(ls, 1)).duration[DUR_TELEPORT]);
+}
+
+// party.set_god(i, god, piety): make player i a worshipper (test helper; no
+// gifts, abilities or other side effects of really joining).
+LUAFN(party_lua_set_god)
+{
+    player &p = const_cast<player &>(party_member(_lua_index(ls, 1)));
+    const god_type god = str_to_god(luaL_checkstring(ls, 2));
+    if (god == GOD_NO_GOD)
+        luaL_argerror(ls, 2, "unknown god");
+    p.religion = god;
+    p.raw_piety = luaL_safe_checkint(ls, 3);
+    p.penance[god] = 0;
+    return 0;
+}
+
+// party.malevolence(): roll the "malevolent force" trap effects on the
+// player in `you` now (a hidden shaft, an alarm or a teleport).
+LUAFN(party_lua_malevolence)
+{
+    UNUSED(ls);
+    do_trap_effects();
+    return 0;
+}
+
+// party.anchor(i, aut): put a dimension anchor on player i (0 removes it).
+LUAFN(party_lua_anchor)
+{
+    const_cast<player &>(party_member(_lua_index(ls, 1)))
+        .duration[DUR_DIMENSION_ANCHOR]
+        = luaL_safe_checkint(ls, 2);
+    return 0;
+}
+
 // party.form(i): player i's current form ("" if none), read from their own
 // struct (not `you`), so it shows whether a transformation leaked across.
 LUAFN(party_lua_form)
@@ -1355,6 +1879,24 @@ LUAFN(party_lua_revive_progress)
     PLUARET(integer, party_revive_progress(_lua_index(ls, 1)) / BASELINE_DELAY);
 }
 
+// party.gem(i, adj): whether player i has found and lost the gem with
+// adjective `adj` (e.g. "lair"), and how many aut its clock has run.
+LUAFN(party_lua_gem)
+{
+    const player &p = party_member(_lua_index(ls, 1));
+    const string adj = luaL_checkstring(ls, 2);
+    for (int g = 0; g < NUM_GEM_TYPES; ++g)
+        if (lowercase_string(gem_adj(static_cast<gem_type>(g))) == adj)
+        {
+            lua_pushboolean(ls, p.gems_found[g]);
+            lua_pushboolean(ls, p.gems_shattered[g]);
+            lua_pushinteger(ls, p.gem_time_spent[g]);
+            return 3;
+        }
+    luaL_error(ls, "no such gem: %s", adj.c_str());
+    return 0;
+}
+
 LUAFN(party_lua_hp)
 {
     const player &p = party_member(_lua_index(ls, 1));
@@ -1383,10 +1925,16 @@ LUAFN(party_lua_pos)
 const struct luaL_Reg party_dlib[] =
 {
 { "size", party_lua_size },
+{ "loot_scale", party_lua_loot_scale },
 { "active", party_lua_active },
 { "add_player", party_lua_add_player },
 { "switch_to", party_lua_switch_to },
 { "add_character", party_lua_add_character },
+{ "xp", party_lua_xp },
+{ "teleporting", party_lua_teleporting },
+{ "anchor", party_lua_anchor },
+{ "set_god", party_lua_set_god },
+{ "malevolence", party_lua_malevolence },
 { "species", party_lua_species },
 { "fallen", party_lua_fallen },
 { "set_pos", party_lua_set_pos },
@@ -1395,6 +1943,7 @@ const struct luaL_Reg party_dlib[] =
 { "spend", party_lua_spend },
 { "reset", party_lua_reset },
 { "hp", party_lua_hp },
+{ "gem", party_lua_gem },
 { "set_hp", party_lua_set_hp },
 { "pos", party_lua_pos },
 { "where", party_lua_where },

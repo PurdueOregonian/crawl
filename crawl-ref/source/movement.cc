@@ -1191,13 +1191,15 @@ void move_player_action(coord_def move)
         return;
 
     // Party members swap places, like allies do, when you walk into them on
-    // purpose -- and when exploring, since the explorer leads the group and
-    // the others only follow. Other travel stops instead: two players
+    // purpose -- and when exploring or travelling as the group's leader,
+    // since the others only follow. Anything else stops instead: two players
     // travelling the same way could swap back and forth forever.
     const int mate = party_member_at(you.pos() + move);
     if (mate >= 0)
     {
-        if (you.running && !you.running.is_explore())
+        if (you.running
+            && !(you.running.is_any_travel()
+                 && party_may_swap_while_travelling()))
         {
             mprf("%s is in the way.", party_member_name(mate).c_str());
             stop_running();

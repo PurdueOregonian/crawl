@@ -48,6 +48,7 @@
 #include "items.h"
 #include "jobs.h"
 #include "kills.h"
+#include "lan.h"
 #include "libutil.h"
 #include "longwalk-range-mode.h"
 #include "macro.h"
@@ -4870,6 +4871,10 @@ enum commandline_option_type
     CLO_AWAIT_CONNECTION,
     CLO_PRINT_WEBTILES_OPTIONS,
 #endif
+    CLO_LAN_HOST,
+    CLO_LAN_JOIN,
+    CLO_LAN_SCRIPT,
+    CLO_LAN_DUMP,
     CLO_RESET_CACHE,
 
     CLO_NOPS
@@ -4924,6 +4929,7 @@ static const char *cmd_ops[] =
 #ifdef USE_TILE_WEB
     "webtiles-socket", "await-connection", "print-webtiles-options",
 #endif
+    "lan-host", "lan-join", "lan-script", "lan-dump",
     "reset-cache",
 };
 
@@ -6035,6 +6041,41 @@ bool parse_args(int argc, char **argv, bool rc_only)
                 return false;
             crawl_state.build_db = true;
             enter_headless_mode();
+            break;
+
+        case CLO_LAN_HOST:
+            // -lan-host [port]: host a LAN party (see lan.h).
+            if (next_is_param)
+            {
+                lan_request_host(atoi(next_arg));
+                nextUsed = true;
+            }
+            else
+                lan_request_host(LAN_DEFAULT_PORT);
+            break;
+
+        case CLO_LAN_JOIN:
+            // -lan-join host[:port]: play in someone else's LAN party.
+            if (!next_is_param)
+                return false;
+            lan_request_join(next_arg);
+            nextUsed = true;
+            break;
+
+        case CLO_LAN_SCRIPT:
+            // Testing: keys for a LAN client to type on its turns.
+            if (!next_is_param)
+                return false;
+            lan_set_client_script(next_arg);
+            nextUsed = true;
+            break;
+
+        case CLO_LAN_DUMP:
+            // Testing: a BMP file a LAN client saves its screen to.
+            if (!next_is_param)
+                return false;
+            lan_set_client_dump(next_arg);
+            nextUsed = true;
             break;
 
         case CLO_RESET_CACHE:

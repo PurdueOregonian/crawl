@@ -123,6 +123,16 @@ LUAFN(crawl_stderr)
 {
     const char *text = luaL_checkstring(ls, 1);
     fprintf(stderr, "%s\n", text);
+    // Tiles on Windows is a GUI program, whose stderr can't be redirected:
+    // scripted tests (e.g. util/lan-smoke.ps1) name a log file instead.
+    if (const char *path = getenv("CRAWL_STDERR_FILE"))
+    {
+        if (FILE *f = fopen(path, "a"))
+        {
+            fprintf(f, "%s\n", text);
+            fclose(f);
+        }
+    }
     return 0;
 }
 

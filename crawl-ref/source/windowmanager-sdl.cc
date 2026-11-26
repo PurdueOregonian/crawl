@@ -27,6 +27,7 @@
 #include "cio.h"
 #include "files.h"
 #include "glwrapper.h"
+#include "lan.h"
 #include "libutil.h"
 #include "options.h"
 #include "syscalls.h"
@@ -576,6 +577,7 @@ int SDLWrapper::init(coord_def *m_windowsz)
     }
 
     m_context = SDL_GL_CreateContext(m_window);
+    lan_set_window(m_window);
 
     // The following two lines are a part of the magical dance needed to get
     // Mojave to work with the version of SDL2 we are using.
@@ -747,6 +749,12 @@ unsigned int SDLWrapper::get_ticks() const
 
 unsigned char SDLWrapper::get_mod_state() const
 {
+    // LAN play, a remote player's turn: their modifier keys, not ours.
+    int x, y;
+    uint32_t buttons;
+    uint16_t mod;
+    if (lan_remote_input(x, y, buttons, mod))
+        return _kmod_to_mod((SDL_Keymod)mod);
     return _kmod_to_mod(SDL_GetModState());
 }
 
@@ -806,7 +814,22 @@ void SDLWrapper::set_mouse_cursor(mouse_cursor_type type)
 
 unsigned short SDLWrapper::get_mouse_state(int *x, int *y) const
 {
-    Uint32 state = SDL_GetMouseState(x, y);
+    // LAN play, a remote player's turn: where their mouse is, not ours
+    // (the UI works out what's under the pointer from this).
+    int rx, ry;
+    uint32_t rbuttons;
+    uint16_t rmod;
+    Uint32 state;
+    if (lan_remote_input(rx, ry, rbuttons, rmod))
+    {
+        state = rbuttons;
+        if (x)
+            *x = rx;
+        if (y)
+            *y = ry;
+    }
+    else
+        state = SDL_GetMouseState(x, y);
     if (x)
         *x = display_density.apply_game_scale(*x);
     if (y)
@@ -943,7 +966,9 @@ int SDLWrapper::wait_event(wm_event *event, int timeout)
         // event below.
     }
 
-    if (!SDL_WaitEventTimeout(&sdlevent, timeout))
+    // LAN play: on a remote player's turn their input arrives over the
+    // network, and this keyboard and mouse are ignored.
+    if (!lan_wait_event(sdlevent, timeout))
         return 0;
 
     if (sdlevent.type != SDL_TEXTINPUT)
@@ -1061,6 +1086,9 @@ void SDLWrapper::remove_timer(unsigned int& timer_id)
 
 void SDLWrapper::swap_buffers()
 {
+    // LAN play: a frame for a remote player is sent to them, not shown here.
+    if (lan_present())
+        return;
     SDL_GL_SwapWindow(m_window);
 }
 
@@ -1122,6 +1150,22 @@ bool SDLWrapper::next_event_is(wm_event_type type)
     default:
         // Error
         return 0;
+    }
+
+    // LAN play, a remote player's turn: their input is what counts.
+    if (lan_routing_remote())
+    {
+        switch (event)
+        {
+        case SDL_KEYDOWN:
+            return lan_peek_remote(SDL_KEYDOWN)
+                   || lan_peek_remote(SDL_TEXTINPUT);
+        case SDL_KEYUP: case SDL_MOUSEMOTION: case SDL_MOUSEBUTTONUP:
+        case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEWHEEL:
+            return lan_peek_remote(event);
+        default:
+            break;
+        }
     }
 
     SDL_Event store;

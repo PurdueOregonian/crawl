@@ -2301,6 +2301,15 @@ static int _letter_for_consumable(item_def& item, bool first_pickup)
     die("Unable to find any slot for %s", item.name(DESC_THE, false, true).c_str());
 }
 
+// A consumable in you.inv whose letter another one (used the same way)
+// already has: give it a fresh letter, as on pickup. For the party's shared
+// pack, where two players' consumables are merged.
+void reassign_consumable_letter(item_def& item)
+{
+    ASSERT(inventory_category_for(item) == INVENT_CONSUMABLE);
+    item.slot = _letter_for_consumable(item, true);
+}
+
 // Assigns a letter to an item in you.inv.
 // For gear, this will strictly correspond to its index.
 // For consumables, this is more complicated.

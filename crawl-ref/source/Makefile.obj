@@ -183,6 +183,7 @@ ouch.o \
 outer-menu.o \
 output.o \
 package.o \
+lan.o \
 party.o \
 pattern.o \
 pcg.o \

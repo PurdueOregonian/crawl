@@ -1,0 +1,58 @@
+<
+-- Host side of util/lan-smoke.ps1. Player 1 is scripted here; player 2 is
+-- played by the client (crawl -lan-join ... -lan-script ...), so on player
+-- 2's turns this script does nothing and the game waits for the network.
+local step = 0
+local passes = 0
+local t0
+local function d(code) return crawl.call_dlua(code) end
+local function log(s) crawl.stderr("SMOKE " .. s .. "\n") end
+local function state()
+  return d([[local x1,y1 = party.pos(1); local x2,y2 = party.pos(2)
+    return string.format("size=%d active=%d p1=(%d,%d) p2=(%d,%d) time=%d",
+      party.size(), party.active(), x1, y1, x2, y2, you.time())]])
+end
+function ready()
+  passes = passes + 1
+  if passes > 100 then log("GAVE UP " .. state()); return end
+  if d("return party.active()") ~= 1 then
+    log("player 2's turn: waiting for the client " .. state())
+    return
+  end
+  if step == 0 then
+    log("START " .. state())
+    if d("return party.size()") ~= 2 then log("FAIL party did not start"); step = 99; return end
+    -- Send player 2 somewhere else on the level, so the two views differ.
+    local moved = d([[
+      local x1, y1 = party.pos(1)
+      for r = 12, 30 do
+        for x = 1, 78 do for y = 1, 68 do
+          if math.max(math.abs(x - x1), math.abs(y - y1)) == r
+             and dgn.grid(x, y) == dgn.feature_number("floor")
+             and not dgn.mons_at(x, y) then
+            party.set_pos(2, x, y)
+            return string.format("(%d,%d)", x, y)
+          end
+        end end
+      end
+      return nil]])
+    log("moved player 2 to " .. tostring(moved))
+    t0 = d("return you.time()")
+    step = 1
+    crawl.sendkeys("s")       -- player 1 waits; player 2's turn is next
+  elseif step == 1 then
+    log("BACK TO P1 " .. state())
+    if d("return you.time()") >= t0 + 10 then
+      log("PASS player 2 played their turn from the client")
+    else
+      log("FAIL the round didn't complete")
+    end
+    step = 2
+    crawl.sendkeys("s")       -- one more round, so the client shows its view
+  elseif step == 2 then
+    log("SMOKE-SETTLE " .. state())
+    log("DONE")
+    step = 99
+  end
+end
+>

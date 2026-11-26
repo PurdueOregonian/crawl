@@ -69,6 +69,7 @@
 #include "nearby-danger.h"
 #include "ouch.h"
 #include "output.h"
+#include "party.h"
 #include "player.h"
 #include "player-stats.h"
 #include "random.h"
@@ -1534,7 +1535,8 @@ void player_reacts()
 
     player_update_auras();
 
-    incr_gem_clock();
+    if (!party_active())   // a party's gem clock ticks per round instead
+        incr_gem_clock();
     incr_zot_clock();
 }
 

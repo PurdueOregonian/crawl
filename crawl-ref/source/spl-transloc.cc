@@ -44,6 +44,7 @@
 #include "nearby-danger.h"
 #include "orb.h"
 #include "output.h"
+#include "party.h"
 #include "prompt.h"
 #include "random-var.h"
 #include "religion.h"
@@ -979,6 +980,7 @@ void you_teleport(bool is_hostile, mid_t teleportitis_source)
         mpr("You feel strangely stable.");
         you.duration[DUR_TELEPORT] = 0;
         you.props.erase(TELEPORTITIS_SOURCE);
+        party_cancel_teleport();
     }
     else
     {
@@ -1007,6 +1009,7 @@ void you_teleport(bool is_hostile, mid_t teleportitis_source)
 
         if (is_hostile)
             you.props[TELEPORTITIS_SOURCE].get_int() = teleportitis_source;
+        party_share_teleport();
     }
 }
 
@@ -1298,6 +1301,9 @@ bool hostile_teleport_player(monster* source)
         }
     }
 
+    if (did_teleport)
+        party_teleport_along();
+
     return did_teleport;
 }
 
@@ -1392,7 +1398,11 @@ void you_teleport_now(string reason, bool manual_tele, bool wizard_tele)
         you.props.erase(TELEPORTITIS_SOURCE);
     }
     else
+    {
         randtele = _teleport_player(wizard_tele, reason);
+        if (randtele)
+            party_teleport_along();
+    }
 
     if (need_abyss_rune_warning)
         mprf(MSGCH_WARN, "You feel the abyssal rune grow more distant.");

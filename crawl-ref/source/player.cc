@@ -63,6 +63,7 @@
 #include "nearby-danger.h"
 #include "notes.h"
 #include "output.h"
+#include "party.h"
 #include "player-equip.h"
 #include "player-notices.h"
 #include "player-reacts.h"
@@ -2952,6 +2953,7 @@ unsigned int gain_exp(unsigned int exp_gained)
         return 0;
 
     you.experience_pool += exp_gained;
+    party_share_exp(exp_gained);
 
     if (player_under_penance(GOD_HEPLIAKLQANA))
         return 0; // no XP for you!

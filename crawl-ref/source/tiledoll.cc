@@ -1005,6 +1005,12 @@ void fill_doll_for_newgame(dolls_data &result, const newgame_def& ng)
     for (int j = 0; j < TILEP_PART_MAX; j++)
         result.parts[j] = TILEP_SHOW_EQUIP;
 
+    // A party member is chosen mid-game, when `you` already has the game's
+    // save open. Keep it out of the copies, or the copy's destructor asserts.
+    package *save = you.save;
+    you.save = nullptr;
+    ON_UNWIND { you.save = save; };
+
     unwind_var<player> unwind_you(you);
     you = player();
 

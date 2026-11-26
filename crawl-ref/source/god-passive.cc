@@ -298,6 +298,20 @@ bool have_passive(passive_t passive)
                                  });
 }
 
+bool player_has_passive(const player &p, passive_t passive)
+{
+    int piety = p.raw_piety;
+    if (p.attribute[ATTR_OSTRACISM] && god_cares_about_ostracism(p.religion))
+        piety = max(0, min(piety, MAX_PIETY - p.attribute[ATTR_OSTRACISM]));
+    const bool penance = p.penance[p.religion];
+    return _god_gives_passive_if(p.religion, passive,
+                                 [&] (god_passive gp)
+                                 {
+                                     return piety_rank(piety) >= gp.rank
+                                         && (!penance || gp.rank < 0);
+                                 });
+}
+
 bool will_have_passive(passive_t passive)
 {
   return _god_gives_passive_if(you.religion, passive,

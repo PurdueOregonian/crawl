@@ -3,6 +3,8 @@
 # mode and lets util/party-smoke-<scenario>.lua.rc play:
 #   stairs  - both players wait a turn, then player 1 takes stairs and the
 #             script checks the party arrived together.
+#   travel  - Ctrl+G to the next floor: player 2 follows player 1 to the
+#             stairs without being prompted and the party arrives together.
 #   explore - group autoexplore: player 1 explores, player 2 must follow
 #             without being prompted, stay close, and never swap places.
 #   rest    - group rest: player 2 rests along until everyone is healed;
@@ -20,24 +22,27 @@
 # so this is the check for level changes.
 #
 # Usage (from crawl-ref/source):
-#   pwsh util/party-smoke.ps1 [-Scenario stairs|explore|rest|characters|talisman|autofight|corpse|all] [-TimeoutSec 60]
+#   pwsh util/party-smoke.ps1 [-Scenario stairs|travel|explore|rest|characters|talisman|autofight|corpse|all] [-TimeoutSec 60] [-Exe path\to\crawl.exe]
 # Exit code: 0 = PASS, 1 = FAIL, 2 = crash/timeout. Prints the script's log
 # and the final screen (read with util/peek-console.ps1).
 
-param([string]$Scenario = "all", [int]$TimeoutSec = 60)
+# -Exe: a console crawl.exe built elsewhere (when source/crawl.exe is a tiles
+# build or locked by a running game); it's pointed at source/ for its data.
+param([string]$Scenario = "all", [int]$TimeoutSec = 60, [string]$Exe = "")
 
 if ($Scenario -eq "all") {
     $worst = 0
-    foreach ($s in "stairs", "explore", "rest", "characters", "talisman", "autofight", "corpse") {
+    foreach ($s in "stairs", "travel", "explore", "rest", "characters", "talisman", "autofight", "corpse") {
         "##### scenario: $s"
-        & pwsh -NoProfile -File $PSCommandPath -Scenario $s -TimeoutSec $TimeoutSec
+        & pwsh -NoProfile -File $PSCommandPath -Scenario $s -TimeoutSec $TimeoutSec -Exe $Exe
         $worst = [Math]::Max($worst, $LASTEXITCODE)
     }
     exit $worst
 }
 
 $src = Split-Path -Parent $PSScriptRoot
-$exe = Join-Path $src "crawl.exe"
+$exe = if ($Exe) { $Exe } else { Join-Path $src "crawl.exe" }
+$dirArg = if ($Exe) { "-dir `"$src`" " } else { "" }
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("crawl-party-smoke-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Force "$work\saves", "$work\morgue" | Out-Null
 $log = "$work\smoke.log"
@@ -67,7 +72,7 @@ if (-not $menuKeys) { $header += "party_choose_characters = false" }
 Set-Content $rc ($header + $scenarioLines)
 
 # cmd /c gives crawl its own console; the script logs via crawl.stderr.
-$cmdline = "`"`"$exe`" -wizard -rc `"$rc`" > `"$log`" 2>&1`""
+$cmdline = "`"`"$exe`" $dirArg-wizard -rc `"$rc`" > `"$log`" 2>&1`""
 $p = Start-Process cmd.exe -ArgumentList "/c", $cmdline -WorkingDirectory $src `
         -WindowStyle Minimized -PassThru
 

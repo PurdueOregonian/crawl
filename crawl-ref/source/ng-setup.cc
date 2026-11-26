@@ -3,6 +3,7 @@
 #include "ng-setup.h"
 
 #include "adjust.h"
+#include "branch.h"
 #include "dungeon.h"
 #include "end.h"
 #include "files.h"
@@ -19,6 +20,7 @@
 #include "ng-init.h"
 #include "ng-wanderer.h"
 #include "options.h"
+#include "party.h"
 #include "piety-info.h"
 #include "prompt.h"
 #include "religion.h"
@@ -761,6 +763,13 @@ void setup_party_member(const newgame_def& ng)
     you.seen_misc        = world.seen_misc;
     you.seen_talisman    = world.seen_talisman;
 
+    // Places visited so far. load_level() asserts that a level can't be seen
+    // without its branch having been visited, so a blank record crashes the
+    // first time this player is the one to reach a new level.
+    you.global_info = world.global_info;
+    for (branch_iterator it; it; ++it)
+        you.get_place_info(it->id) = world.get_place_info(it->id);
+
     // Props mix both kinds (visited levels, shop fixups, ... and character
     // keys). Start from the world's; character setup below sets its own keys
     // on top. XXX: a character key the old player had and the new one
@@ -769,6 +778,19 @@ void setup_party_member(const newgame_def& ng)
 
     shopping_list.refresh();
     _setup_character(ng);
+
+    // The party's shared pack was in `you` (it goes with whoever has
+    // control); put it back alongside the new character's starting kit.
+    // What the old player had on isn't the pack and goes away with them.
+    for (int i = 0; i < ENDOFPACK; ++i)
+    {
+        const item_def &item = world.inv[i];
+        bool worn = false;
+        for (const player_equip_entry &e : world.equipment.items)
+            worn = worn || e.item == i;
+        if (item.defined() && !worn)
+            party_add_to_pack(item);
+    }
 
     you.save = save;
 }

@@ -84,6 +84,7 @@
 #include "jobs.h"
 #include "known-items.h"
 #include "level-state-type.h"
+#include "lan.h"
 #include "libutil.h"
 #include "lookup-help.h"
 #include "luaterp.h"
@@ -342,6 +343,14 @@ int main(int argc, char *argv[])
         term_colours[col.colour_index] = col.colour_def;
 #endif
 
+    // -lan-join: this copy is only a window onto the host's game (see
+    // lan.h).
+    if (lan_join_requested())
+    {
+        lan_run_client(lan_join_address());
+        end(0);
+    }
+
     _launch_game_loop();
     if (crawl_state.last_game_exit.message.size())
         end(0, false, "%s\n", crawl_state.last_game_exit.message.c_str());
@@ -470,14 +479,16 @@ NORETURN static void _launch_game()
     // The party lives in globals, so drop any left over from a previous game
     // played in this process (restart after death/quit) first.
     party_reset();
-    if (Options.party_size > 1)
+    // Hosting a LAN game means at least one other player.
+    const int party_players = party_planned_size();
+    if (party_players > 1)
     {
         if (!game_start)
             mprf(MSGCH_WARN, "Party members aren't saved yet; they rejoin as "
                              "copies of you.");
         // New game: each extra player picks their own character, unless
         // party_choose_characters = false (then they're copies of you).
-        party_start(Options.party_size,
+        party_start(party_players,
                     game_start && Options.party_choose_characters);
     }
 
@@ -1296,6 +1307,12 @@ static void _input()
         _player_action_done();
         return;
     }
+
+    // This player is about to be asked for a command: tell them it's their
+    // turn (automatic turns before this one go by silently).
+    party_announce_if_new();
+    // LAN play: everyone else sees their own player's view while waiting.
+    lan_refresh_idle_views(true);
 
     crawl_state.check_term_size();
     if (crawl_state.terminal_resized)
@@ -2731,6 +2748,10 @@ void world_reacts()
     // In a party, per-player upkeep runs per action (party_action_done).
     if (!crawl_state.game_is_arena() && !party_in_monster_phase())
         player_reacts();
+    // The party shares its gems, so their clock ticks once per round (game
+    // time) rather than once per member's action.
+    if (party_in_monster_phase())
+        incr_gem_clock();
 
     if (player_in_branch(BRANCH_ABYSS))
         maybe_shift_abyss_around_player();

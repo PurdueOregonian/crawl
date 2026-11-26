@@ -266,6 +266,9 @@ enum ru_interference
 
 bool god_gives_passive(god_type god, passive_t passive);
 bool have_passive(passive_t passive);
+// Like have_passive(), for a player who needn't be the one in `you` (a party
+// member waiting for their turn).
+bool player_has_passive(const player &p, passive_t passive);
 bool will_have_passive(passive_t passive);
 int rank_for_passive(passive_t passive);
 

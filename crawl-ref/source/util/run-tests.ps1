@@ -14,15 +14,22 @@
 
 param(
     [string]$Tests = "",
-    [int]$TimeoutSec = 600
+    [int]$TimeoutSec = 600,
+    # A console crawl.exe built elsewhere (e.g. with -p:OutDir=...), for when
+    # the one in source/ is a tiles build or is locked by a running game.
+    # It still runs from source/, so it finds dat/ and test/ there.
+    [string]$Exe = ""
 )
 
 $src = Split-Path -Parent $PSScriptRoot
-$exe = Join-Path $src "crawl.exe"
+$exe = if ($Exe) { $Exe } else { Join-Path $src "crawl.exe" }
 if (-not (Test-Path $exe)) { Write-Error "crawl.exe not found in $src (build Debug Console first)"; exit 2 }
 
 $log = Join-Path ([System.IO.Path]::GetTempPath()) ("crawl-test-{0}.log" -f [guid]::NewGuid())
-$crawlArgs = @("-test")
+$crawlArgs = @()
+# crawl looks for its data next to the exe; point an outside exe at source/.
+if ($Exe) { $crawlArgs += @("-dir", "`"$src`"") }
+$crawlArgs += "-test"
 if ($Tests) { $crawlArgs += $Tests }
 
 # cmd /c gives crawl a console of its own; stdout+stderr go to the log.

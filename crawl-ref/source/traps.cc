@@ -38,6 +38,7 @@
 #include "mon-place.h"
 #include "nearby-danger.h"
 #include "orb.h"
+#include "party.h"
 #include "player-notices.h"
 #include "random.h"
 #include "religion.h"
@@ -786,14 +787,18 @@ void do_trap_effects()
     if (env.absdepth0 > 3)
         available_traps.push_back(DNGN_TRAP_ALARM);
 
+    // In a party, a teammate's god (Ashenzari) warns everyone.
+    const god_type warner = party_passive_god(passive_t::avoid_traps);
+
     switch (*random_iterator(available_traps))
     {
         case DNGN_TRAP_SHAFT:
             dprf("Attempting to shaft player.");
             _print_malev();
-            if (have_passive(passive_t::avoid_traps))
+            if (warner != GOD_NO_GOD)
             {
-                simple_god_message(" reveals a hidden shaft just before you would have fallen in.");
+                simple_god_message(" reveals a hidden shaft just before you would have fallen in.",
+                                   false, warner);
                 return;
             }
             if (you.do_shaft())
@@ -806,9 +811,10 @@ void do_trap_effects()
             // XXX: improve messaging to make it clear there's a wail outside of the
             // player's silence
             _print_malev();
-            if (have_passive(passive_t::avoid_traps))
+            if (warner != GOD_NO_GOD)
             {
-                simple_god_message(" reveals an alarm trap just before you would have tripped it.");
+                simple_god_message(" reveals an alarm trap just before you would have tripped it.",
+                                   false, warner);
                 return;
             }
             mpr("With a horrendous wail, an alarm goes off!");
@@ -826,10 +832,11 @@ void do_trap_effects()
             string msg = make_stringf("%s and a teleportation trap "
                                       "spontaneously manifests!",
                                       _malev_msg().c_str());
-            if (have_passive(passive_t::avoid_traps))
+            if (warner != GOD_NO_GOD)
             {
                 mpr(msg);
-                simple_god_message(" warns you in time for you to avoid it.");
+                simple_god_message(" warns you in time for you to avoid it.",
+                                   false, warner);
                 return;
             }
             mpr(msg);

@@ -46,6 +46,7 @@
 #include "mon-transit.h"
 #include "notes.h"
 #include "output.h" // redraw_screens
+#include "party.h"
 #include "religion.h"
 #include "spl-clouds.h" // big_cloud
 #include "stash.h"
@@ -1533,6 +1534,8 @@ static void abyss_area_shift()
             // Specify the map shift so we can tell if the rune moved.
             coord_def delta = you.pos() - old_centre;
             _generate_area(abyss_genlevel_mask, delta);
+            // After the new terrain exists, so teammates land on real floor.
+            party_abyss_shifted(old_centre, delta, ABYSS_AREA_SHIFT_RADIUS);
         }
         forget_map(true);
 
@@ -1710,6 +1713,7 @@ void abyss_morph()
     _abyss_apply_terrain(abyss_genlevel_mask, true);
     _place_displaced_monsters();
     _push_items();
+    party_abyss_morphed();
     // TODO: does gozag gold detection need to be here too?
     los_changed();
 }
@@ -1775,6 +1779,9 @@ void abyss_teleport(bool wizard_tele)
     _abyss_generate_new_area();
     _write_abyssal_features();
     env.grid(you.pos()) = _veto_dangerous_terrain(env.grid(you.pos()));
+
+    // A new area for the whole party: bring everyone to the player's side.
+    party_teleport_along();
 
     stop_delay(true);
     forget_map(false);
