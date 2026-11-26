@@ -43,10 +43,14 @@ void lan_set_client_dump(const string &path);
 bool lan_host_start(int port, string &err);
 // This computer's addresses, for telling the other players ("" if unknown).
 string lan_host_addresses();
-// Before a hosted game starts: show who's joined and wait until each of
-// party members 2..`players` has a computer (or the host starts anyway).
-// False if the host gave up hosting.
-bool lan_host_lobby(int players);
+// Before a hosted game starts: show who's joined, taking each computer that
+// connects as the next player, until the host starts the game. The party is
+// then player 1, everyone who joined, and any extra players the host added
+// at this computer (see lan_lobby_party_size()). False if the host gave up
+// hosting.
+bool lan_host_lobby();
+// The party size the lobby settled on, or 0 if no lobby was held.
+int lan_lobby_party_size();
 // Stop hosting: drop everyone and stop listening.
 void lan_host_stop();
 

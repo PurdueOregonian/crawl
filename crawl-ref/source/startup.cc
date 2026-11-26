@@ -1159,7 +1159,7 @@ bool startup_step()
 
     // Hosting a LAN game: everyone joins before anything else happens.
     if (lan_host_requested() && !lan_active()
-        && !lan_host_lobby(party_planned_size()))
+        && !lan_host_lobby())
     {
         game_ended(game_exit::abort);
     }

@@ -341,7 +341,8 @@ bool lan_host_wait_for_player(int /*idx*/)
     return false;
 }
 
-bool lan_host_lobby(int /*players*/) { return true; }
+bool lan_host_lobby() { return true; }
+int lan_lobby_party_size() { return 0; }
 void lan_host_stop() { host_port = -1; }
 bool lan_active() { return false; }
 int lan_seat_of_player(int /*idx*/) { return 0; }
@@ -377,6 +378,8 @@ namespace
     };
 
     sock_t listener = BAD_SOCK;
+    // Party size the lobby settled on (0: no lobby was held).
+    int lobby_party = 0;
     // seats[0] is the host's own screen and is never connected.
     vector<seat> seats(1);
     int seat_override = -1;
@@ -697,8 +700,14 @@ namespace
     }
 }
 
-bool lan_host_lobby(int players)
+int lan_lobby_party_size()
 {
+    return lobby_party;
+}
+
+bool lan_host_lobby()
+{
+    lobby_party = 0;
     if (!lan_host_requested())
         return true;
     if (!_listen())
@@ -709,6 +718,9 @@ bool lan_host_lobby(int players)
         return true;
     }
 
+    // Players at this computer besides player 1 (hotseat), after the
+    // remote ones.
+    int locals = 0;
     bool cancel = false, start_now = false;
     auto text = make_shared<ui::Text>();
     text->set_margin_for_sdl(10);
@@ -717,6 +729,10 @@ bool lan_host_lobby(int players)
         const int key = ev.key();
         if (key == CK_ENTER || key == '\r' || key == '\n')
             start_now = true;
+        else if (key == '+' || key == '=')
+            ++locals;
+        else if (key == '-' || key == '_')
+            locals = max(locals - 1, 0);
         else if (ui::key_exits_popup(key, false))
             cancel = true;
         return true;
@@ -724,40 +740,58 @@ bool lan_host_lobby(int players)
     ui::push_layout(popup);
 
     const string how = _join_instructions();
+    // Scripted tests: start by ourselves once the party is this big.
+    const char *autostart_env = getenv("CRAWL_LAN_AUTOSTART");
+    const int autostart = autostart_env ? atoi(autostart_env) : 0;
+    int remotes = 0;
     while (!cancel && !start_now && !crawl_state.seen_hups)
     {
-        // Forget anyone who left again.
+        // Forget anyone who left again, and number the rest 2, 3, ... in
+        // the order they joined (telling them if that changed).
         for (int k = (int)seats.size() - 1; k >= 1; --k)
             if (!seats[k].conn.fill(0) || !seats[k].conn.flush())
                 seats.erase(seats.begin() + k);
-
-        int missing = 0;
-        string list = "<white>Player 1</white>: you\n";
-        int first_free = -1;
-        for (int idx = 1; idx < players; ++idx)
+        remotes = (int)seats.size() - 1;
+        for (int k = 1; k <= remotes; ++k)
         {
-            const bool in = lan_seat_of_player(idx) > 0;
-            if (!in)
-            {
-                ++missing;
-                if (first_free < 0)
-                    first_free = idx;
-            }
-            list += make_stringf("<white>Player %d</white>: %s\n", idx + 1,
-                                 in ? "<lightgreen>joined</lightgreen>"
-                                    : "<yellow>waiting...</yellow>");
+            if (seats[k].player == k)
+                continue;
+            seats[k].player = k;
+            vector<uint8_t> welcome;
+            _put32(welcome, k);
+            _put32(welcome, k + 1);
+            seats[k].conn.send_msg('W', welcome);
         }
-        if (!missing)
+        locals = min(locals, PARTY_MAX_SIZE - 1 - remotes);
+        const int players = 1 + remotes + locals;
+        if (autostart > 0 && players >= autostart)
             break;
 
+        string list = "<white>Player 1</white>: you\n";
+        for (int idx = 1; idx < players; ++idx)
+        {
+            list += make_stringf("<white>Player %d</white>: %s\n", idx + 1,
+                                 idx <= remotes
+                                 ? "<lightgreen>joined</lightgreen>"
+                                 : "<lightcyan>plays at this computer"
+                                   "</lightcyan>");
+        }
+        const bool full = players >= PARTY_MAX_SIZE;
+        if (!full)
+            list += "<darkgrey>(waiting for more players...)</darkgrey>\n";
+
         text->set_text(formatted_string::parse_string(
-            "<cyan>Hosting a LAN game for " + to_string(players)
-            + " players.</cyan>\n\n" + how + "\n\n" + list
-            + "\nThe game starts once everyone has joined.\n\n"
-              "<lightgrey>[Enter] start now (missing players play here)\n"
+            "<cyan>Hosting a LAN game.</cyan> The party is everyone who "
+            "joins (up to " + to_string(PARTY_MAX_SIZE) + ").\n\n"
+            + how + "\n\n" + list + "\n"
+              "<lightgrey>[Enter] start the game with "
+            + (players == 1 ? string("just you")
+                            : to_string(players) + " players") + "\n"
+              "[+]/[-] add/remove a player at this computer\n"
               "[Esc] stop hosting</lightgrey>"));
         ui::pump_events(50);
-        _accept_seat(first_free, 50);
+        if (!full)
+            _accept_seat(remotes + 1, 50);
     }
     ui::pop_layout();
 
@@ -766,6 +800,9 @@ bool lan_host_lobby(int players)
         lan_host_stop();
         return false;
     }
+    // Someone may have joined since the last look: keep the numbers tidy.
+    remotes = (int)seats.size() - 1;
+    lobby_party = min(1 + remotes + locals, PARTY_MAX_SIZE);
     return true;
 }
 
@@ -788,6 +825,10 @@ bool lan_host_wait_for_player(int idx)
     // Already here (from the lobby)?
     if (lan_seat_of_player(idx) > 0)
         return true;
+    // The lobby settled who plays where: anyone without a computer then
+    // plays here.
+    if (lobby_party > 0)
+        return false;
     const string name = party_member_name(idx);
     if (!_listen())
     {

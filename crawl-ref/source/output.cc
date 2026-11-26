@@ -38,6 +38,8 @@
 #include "mutation.h"
 #include "notes.h"
 #include "ouch.h"
+#include "party.h"
+#include "lan.h"
 #include "player-equip.h"
 #include "player-stats.h"
 #include "prompt.h"
@@ -1236,6 +1238,7 @@ struct status_light
         : text(str), status(_status) {}
     formatted_string text;
     int status;
+    bool own_line = false;  // start a new line (don't share one)
 };
 
 #ifdef USE_TILE_LOCAL
@@ -1313,6 +1316,26 @@ static vector<status_light> _get_status_lights()
     for (status_iterator si; si; ++si)
         _add_status_light_to_out(*si, out);
 
+    // Party play: whose turn it is, on its own line below everything else.
+    // In a LAN game each seat is drawn with its own player in `you`, so
+    // "Your turn" there means this screen's player is up; in hotseat play the
+    // screen always shows the player whose turn it is.
+    if (party_active())
+    {
+        const int turn = party_active_index();
+        const string name = party_member_name(turn);
+        if (party_focused_index() != turn)
+        {
+            out.emplace_back(formatted_string(
+                "Waiting: " + name + "'s turn", DARKGREY));
+        }
+        else if (lan_active())
+            out.emplace_back(formatted_string("YOUR TURN", LIGHTGREEN));
+        else
+            out.emplace_back(formatted_string(name + "'s turn", LIGHTGREEN));
+        out.back().own_line = true;
+    }
+
     return out;
 }
 
@@ -1351,7 +1374,10 @@ static void _print_status_lights(int y)
                 + (i_light < lights.size() ? lights[i_light].text.width()
                                            : 10000);
 
-        if (end_x <= crawl_view.hudsz.x)
+        const bool needs_new_line = i_light < lights.size()
+                                    && lights[i_light].own_line
+                                    && wherex() != crawl_view.hudp.x;
+        if (end_x <= crawl_view.hudsz.x && !needs_new_line)
         {
 #ifdef USE_TILE_LOCAL
             _record_status_light(lights[i_light], lights[i_light].text.width());

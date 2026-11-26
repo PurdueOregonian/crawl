@@ -96,10 +96,11 @@ Each player can play from their own computer, and sees their own character's
 view. One computer hosts the game; the others join it.
 
 1. **Host:** type a name and choose **Host LAN Game** on the start menu. The
-   party is `party_size` players (at least 2). A lobby shows this computer's
-   address and who has joined; the game starts once everyone is in. (Enter:
-   start now, with any missing players played at the host. Escape: stop
-   hosting.)
+   lobby shows this computer's address and who has joined. The party is
+   everyone who joins, up to 4 players; `party_size` in the options is only
+   for hotseat play and is ignored here. Enter starts the game, `+`/`-`
+   add or remove an extra player who plays at the host's keyboard, and
+   Escape stops hosting.
 2. **Each other player:** choose **Join LAN Game** and enter the host's
    address (`127.0.0.1` for another copy of Crawl on the same computer).
 3. The host makes player 1, then each joined player picks their own species
@@ -114,7 +115,8 @@ it for private networks. All computers need the same version of Crawl.
 
 - Whoever's turn it is sees the game live, menus and prompts included, and
   only their keyboard and mouse do anything. Everyone else's window shows
-  their own player's view, refreshed as the game goes on.
+  their own player's view, refreshed as the game goes on. Under the stats,
+  a green **YOUR TURN** or a grey "Waiting: Player N's turn" says which.
 - Only the host's computer runs the game (and saves it). If a player's
   computer disconnects, the host plays them from then on.
 - The joining copy only shows pictures of the host's screen, scaled to fit

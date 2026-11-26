@@ -359,8 +359,7 @@ int party_size()
 
 int party_loot_scale()
 {
-    return max({party_size(), Options.party_size,
-                lan_host_requested() ? 2 : 1});
+    return max(party_size(), party_planned_size());
 }
 
 int party_active_index()
@@ -1133,6 +1132,10 @@ namespace
 
 int party_planned_size()
 {
+    // A LAN game's party is whoever joined in the lobby; party_size in the
+    // options is for hotseat play.
+    if (lan_host_requested() && lan_lobby_party_size() > 0)
+        return lan_lobby_party_size();
     return lan_host_requested() ? max(Options.party_size, 2)
                                 : Options.party_size;
 }

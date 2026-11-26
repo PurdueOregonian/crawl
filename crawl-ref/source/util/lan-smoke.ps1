@@ -5,7 +5,8 @@
 #   pwsh util/lan-smoke.ps1 [-TimeoutSec 90] [-Port 31555] [-Out dir]
 #
 # Host: crawl -wizard -rc <rc> -lan-host <port>, with util/lan-smoke-host.lua.rc
-#       (party of 2, player 2 a copy) logging "SMOKE ..." lines to stderr.
+#       (no party_size: the party is 2 because the client joins; player 2 a
+#       copy unless -Choose) logging "SMOKE ..." lines to stderr.
 # Client: crawl -lan-join 127.0.0.1:<port> -lan-script <keys> -lan-dump <png>
 # Screenshots: <Out>/client.png (what the client was sent),
 # <Out>/client-window.png (the client's window) and <Out>/host.png (the
@@ -31,7 +32,6 @@ $header = @(
     "species = Minotaur",
     "background = Gladiator",
     "weapon = flail",
-    "party_size = 2",
     "party_choose_characters = $(if ($Choose) { 'true' } else { 'false' })",
     "show_more = false",
     "restart_after_game = false",
@@ -47,9 +47,12 @@ Set-Content $rc ($header + (Get-Content (Join-Path $PSScriptRoot "lan-smoke-host
 
 # Tiles can't redirect stderr on Windows; crawl.stderr also writes here.
 $env:CRAWL_STDERR_FILE = $hostLog
+# The lobby waits for the host to press Enter; start once player 2 is in.
+$env:CRAWL_LAN_AUTOSTART = "2"
 $h = Start-Process cmd.exe -ArgumentList "/c", "`"`"$exe`" -wizard -rc `"$rc`" -lan-host $Port`"" `
         -WorkingDirectory $src -WindowStyle Minimized -PassThru
 $env:CRAWL_STDERR_FILE = $null
+$env:CRAWL_LAN_AUTOSTART = $null
 $c = Start-Process cmd.exe -ArgumentList "/c", "`"`"$exe`" -lan-join 127.0.0.1:$Port -lan-script $ClientKeys -lan-dump `"$Out\client.bmp`" > `"$clientLog`" 2>&1`"" `
         -WorkingDirectory $src -WindowStyle Minimized -PassThru
 
