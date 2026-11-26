@@ -26,13 +26,17 @@
 
 #include "cio.h"
 #include "libutil.h"
+#include "end.h"
 #include "message.h"
+#include "newgame.h"
+#include "newgame-def.h"
 #include "options.h"
 #include "output.h"
 #include "party.h"
 #include "state.h"
 #include "ui.h"
 #include "stringutil.h"
+#include "unwind.h"
 #include "version.h"
 #include "viewgeom.h"
 #ifdef USE_TILE_LOCAL
@@ -83,6 +87,8 @@ namespace
     string join_address;          // -lan-join
     string client_script;
     string client_dump;
+    // A client is making its character in its own window (the host asked).
+    bool client_choosing = false;
 
     bool _net_init()
     {
@@ -350,6 +356,9 @@ int lan_output_seat() { return 0; }
 lan_seat_scope::lan_seat_scope(int seat) : prev(seat) {}
 lan_seat_scope::~lan_seat_scope() {}
 void lan_refresh_idle_views(bool /*force*/) {}
+void lan_host_begin_choosing() {}
+void lan_host_wait_for_choices() {}
+bool lan_host_choice(int, bool &, int &, int &, int &) { return false; }
 
 #else // USE_TILE_LOCAL
 
@@ -375,6 +384,11 @@ namespace
         int mouse_x = 0, mouse_y = 0;
         uint32_t mouse_buttons = 0;
         uint16_t mod = 0;
+        // Character choice (see lan_host_begin_choosing()): asked and not
+        // yet answered; answered (with the 'P' payload kept in `choice`).
+        bool choosing = false;
+        bool has_choice = false;
+        vector<uint8_t> choice;
     };
 
     sock_t listener = BAD_SOCK;
@@ -385,6 +399,35 @@ namespace
     int seat_override = -1;
     SDL_Window *window = nullptr;
     unsigned int last_idle_refresh = 0;
+    // Player 1 is still making their character (remote seats were asked to
+    // choose at the same time).
+    bool host_choosing = false;
+
+    // Who's still choosing a character, e.g. "Player 1 and Player 3" (""
+    // if nobody).
+    string _still_choosing()
+    {
+        vector<string> who;
+        if (host_choosing)
+            who.push_back(party_member_name(0));
+        for (int k = 1; k < (int)seats.size(); ++k)
+            if (seats[k].conn.ok() && seats[k].choosing)
+                who.push_back(party_member_name(seats[k].player));
+        return comma_separated_line(who.begin(), who.end());
+    }
+
+    // Tell the players who have chosen who they're waiting for.
+    void _send_waiting()
+    {
+        const string who = _still_choosing();
+        const string text = who.empty()
+            ? "Everyone has chosen: the game is starting..."
+            : "Waiting for " + who + " to choose a character...";
+        for (int k = 1; k < (int)seats.size(); ++k)
+            if (seats[k].conn.ok() && !seats[k].choosing)
+                seats[k].conn.send_msg('Q', vector<uint8_t>(text.begin(),
+                                                            text.end()));
+    }
 
     bool _listen()
     {
@@ -458,6 +501,11 @@ namespace
         s.events.clear();
         mprf(MSGCH_WARN, "%s's computer %s; they're played from here now.",
              party_member_name(s.player).c_str(), why);
+        if (s.choosing)
+        {
+            s.choosing = false;
+            _send_waiting();
+        }
     }
 
     int _live_seat()
@@ -495,7 +543,14 @@ namespace
             vector<uint8_t> payload;
             while (s.conn.next(type, payload))
             {
-                if (type == 'E' && payload.size() == sizeof(net_event)
+                if (type == 'P' && s.choosing)
+                {
+                    s.choosing = false;
+                    s.has_choice = true;
+                    s.choice = payload;
+                    _send_waiting();
+                }
+                else if (type == 'E' && payload.size() == sizeof(net_event)
                     && k == live)
                 {
                     net_event e;
@@ -703,6 +758,71 @@ namespace
 int lan_lobby_party_size()
 {
     return lobby_party;
+}
+
+void lan_host_begin_choosing()
+{
+    host_choosing = true;
+    for (int k = 1; k < (int)seats.size(); ++k)
+    {
+        seat &s = seats[k];
+        s.has_choice = false;
+        s.choice.clear();
+        s.choosing = s.conn.send_msg('C', {});
+    }
+}
+
+void lan_host_wait_for_choices()
+{
+    host_choosing = false;
+    _send_waiting();
+    _poll();
+    if (_still_choosing().empty())
+        return;
+
+    bool stop = false;
+    auto text = make_shared<ui::Text>();
+    text->set_margin_for_sdl(10);
+    auto popup = make_shared<ui::Popup>(text);
+    popup->on_keydown_event([&stop](const ui::KeyEvent& ev) {
+        if (ui::key_exits_popup(ev.key(), false))
+            stop = true;
+        return true;
+    });
+    ui::push_layout(popup);
+    string who;
+    while (!stop && !crawl_state.seen_hups)
+    {
+        _poll();
+        who = _still_choosing();
+        if (who.empty())
+            break;
+        text->set_text(formatted_string::parse_string(
+            "<white>Waiting for " + who + " to choose a character...</white>"
+            "\n\n<lightgrey>[Esc] stop waiting (anyone still choosing joins"
+            " as a copy of you)</lightgrey>"));
+        ui::pump_events(50);
+    }
+    ui::pop_layout();
+    // Whoever's still choosing gets no say now (their answer is ignored).
+    for (int k = 1; k < (int)seats.size(); ++k)
+        seats[k].choosing = false;
+}
+
+bool lan_host_choice(int idx, bool &chosen, int &species, int &job,
+                     int &weapon)
+{
+    const int k = lan_seat_of_player(idx);
+    if (k <= 0 || !seats[k].has_choice)
+        return false;
+    const vector<uint8_t> &p = seats[k].choice;
+    if (p.size() < 13)
+        return false;
+    chosen = p[0];
+    species = (int32_t)_get32(&p[1]);
+    job = (int32_t)_get32(&p[5]);
+    weapon = (int32_t)_get32(&p[9]);
+    return true;
 }
 
 bool lan_host_lobby()
@@ -966,10 +1086,20 @@ bool lan_peek_remote(uint32_t sdl_type)
     return false;
 }
 
+namespace
+{
+    bool _client_scripted_event(SDL_Event &event, int timeout);
+}
+
 bool lan_wait_event(SDL_Event &event, int timeout)
 {
     if (!lan_active())
+    {
+        // A client making its character in its own window (test script).
+        if (client_choosing && !client_script.empty())
+            return _client_scripted_event(event, timeout);
         return SDL_WaitEventTimeout(&event, timeout);
+    }
 
     const unsigned int start = SDL_GetTicks();
     while (true)
@@ -1322,6 +1452,36 @@ namespace
         return out;
     }
 
+    // While a client makes its character itself: the test script's keys,
+    // typed a key at a time once things have been quiet for a moment.
+    bool _client_scripted_event(SDL_Event &event, int timeout)
+    {
+        static deque<net_event> queued;
+        static unsigned int typed_at = 0;
+        const unsigned int start = SDL_GetTicks();
+        while (true)
+        {
+            if (!queued.empty())
+            {
+                event = _to_sdl(queued.front());
+                queued.pop_front();
+                return true;
+            }
+            const unsigned int now = SDL_GetTicks();
+            if (!client_script.empty() && now - typed_at > 400)
+            {
+                for (const net_event &e : _script_key(client_script))
+                    queued.push_back(e);
+                typed_at = now;
+                continue;
+            }
+            if (SDL_WaitEventTimeout(&event, 10))
+                return true;
+            if (timeout != INT_MAX && (int)(SDL_GetTicks() - start) >= timeout)
+                return false;
+        }
+    }
+
     // A message in a popup; any key closes it.
     void _client_message(const string &text)
     {
@@ -1412,11 +1572,45 @@ namespace
                 {
                     player_no = _get32(&p[4]);
                     show(make_stringf("<white>You're Player %d.</white>\n"
-                         "Waiting for the game to start: the host may be "
-                         "waiting for other\nplayers, or making their own "
-                         "character. You'll make yours after that.",
-                         player_no));
+                         "Waiting for the host to start the game (they may "
+                         "be waiting\nfor other players). Then everyone "
+                         "makes their character.", player_no));
                 }
+                else if (type == 'C' && player_no)
+                {
+                    // Make our character here, while the others make
+                    // theirs, and tell the host.
+                    newgame_def ng;
+                    bool chosen = false;
+                    try
+                    {
+                        unwind_bool choosing(client_choosing, true);
+                        chosen = choose_party_member(ng,
+                            make_stringf("Player %d", player_no));
+                    }
+                    catch (const game_ended_condition &)
+                    {
+                        // The window was closed.
+                        cancel = true;
+                        break;
+                    }
+                    if (crawl_state.seen_hups)
+                        break;
+                    vector<uint8_t> pick;
+                    pick.push_back(chosen);
+                    _put32(pick, chosen ? (uint32_t)ng.species : 0);
+                    _put32(pick, chosen ? (uint32_t)ng.job : 0);
+                    _put32(pick, chosen ? (uint32_t)ng.weapon : 0);
+                    c.send_msg('P', pick);
+                    show(chosen ? "<white>Character chosen.</white>\n"
+                                  "Waiting for the others to finish..."
+                                : "<white>You'll join as a copy of Player "
+                                  "1.</white>\nWaiting for the others to "
+                                  "finish...");
+                }
+                else if (type == 'Q' && player_no)
+                    show("<white>" + string(p.begin(), p.end())
+                         + "</white>");
                 else if (type == 'S' && !p.empty())
                     my_turn = p[0];
                 else if (type == 'F' && player_no)

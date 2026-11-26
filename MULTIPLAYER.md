@@ -103,9 +103,12 @@ view. One computer hosts the game; the others join it.
    Escape stops hosting.
 2. **Each other player:** choose **Join LAN Game** and enter the host's
    address (`127.0.0.1` for another copy of Crawl on the same computer).
-3. The host makes player 1, then each joined player picks their own species
-   and background on their own computer (keyboard or mouse). Only then is
-   the dungeon made and everyone starts together.
+3. Everyone makes their character at the same time: the host makes player 1
+   while each joined player picks their species and background on their own
+   computer. Whoever finishes first sees who they're still waiting for (the
+   host can press Escape to stop waiting; anyone still choosing then joins
+   as a copy of player 1). Then the dungeon is made and everyone starts
+   together.
 
 From a command line: `crawl -lan-host [port]` hosts (port 31337 by default)
 and `crawl -lan-join <address>[:port]` joins.

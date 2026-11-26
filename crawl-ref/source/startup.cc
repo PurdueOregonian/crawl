@@ -1087,6 +1087,15 @@ bool startup_step()
     // may be in a game-specific subdirectory.
     crawl_state.type = choice.type;
 
+    // -lan-join: this copy is only a window onto the host's game (see
+    // lan.h). It can make its own character, so it needs the databases
+    // loaded above.
+    if (lan_join_requested())
+    {
+        lan_run_client(lan_join_address());
+        end(0);
+    }
+
     newgame_def defaults = read_startup_prefs();
     if (crawl_state.default_startup_name.size() == 0 && Options.remember_name)
         crawl_state.default_startup_name = defaults.name;
@@ -1163,6 +1172,10 @@ bool startup_step()
     {
         game_ended(game_exit::abort);
     }
+    // Everyone makes their character at once: the other computers start
+    // now, while player 1 does below.
+    if (lan_active() && Options.party_choose_characters)
+        lan_host_begin_choosing();
 
     bool newchar = false;
     newgame_def ng;

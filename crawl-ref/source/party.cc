@@ -1146,14 +1146,39 @@ void party_prechoose_characters(int size)
     if (!Options.party_choose_characters)
         return;
     size = min(size, PARTY_MAX_SIZE);
+    // The other computers have been making their characters while player 1
+    // made theirs (see lan_host_begin_choosing()); collect them.
+    lan_host_wait_for_choices();
     for (int idx = 1; idx < size; ++idx)
     {
-        const int seat = lan_seat_of_player(idx);
-        if (seat <= 0)
+        // Anyone who left meanwhile is chosen for here, in party_start().
+        if (lan_seat_of_player(idx) <= 0)
             continue;
-        lan_seat_scope scope(seat);
         prechoice &pc = prechosen[idx];
-        pc.chosen = choose_party_member(pc.ng, party_member_name(idx));
+        int species, job, weapon;
+        if (!lan_host_choice(idx, pc.chosen, species, job, weapon))
+        {
+            // Still choosing when the host stopped waiting.
+            pc.chosen = false;
+            continue;
+        }
+        if (!pc.chosen)
+            continue;
+        pc.ng.species = static_cast<species_type>(species);
+        pc.ng.job = static_cast<job_type>(job);
+        pc.ng.weapon = static_cast<weapon_type>(weapon);
+        // Same version of Crawl on both ends, but don't trust the wire.
+        if (pc.ng.species < 0 || pc.ng.species >= NUM_SPECIES
+            || pc.ng.job < 0 || pc.ng.job >= NUM_JOBS
+            || weapon < 0 || weapon > WPN_VIABLE)
+        {
+            pc.chosen = false;
+            continue;
+        }
+        pc.ng.name = party_member_name(idx);
+        pc.ng.type = (crawl_state.type == GAME_TYPE_TUTORIAL
+                      || crawl_state.type == GAME_TYPE_HINTS)
+                     ? GAME_TYPE_NORMAL : crawl_state.type;
     }
 }
 

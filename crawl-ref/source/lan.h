@@ -69,6 +69,19 @@ const string &lan_join_address();
 // waiting (that player is then played at the host, as in hotseat).
 bool lan_host_wait_for_player(int idx);
 
+// Character choice, all at once: after the lobby, each remote player picks
+// their character at their own computer while player 1 does at the host.
+// Begin: ask every remote seat to choose.
+void lan_host_begin_choosing();
+// Player 1 is done; wait (showing who's still choosing) until every remote
+// player who was asked has answered, or left, or the host stops waiting.
+void lan_host_wait_for_choices();
+// Remote party member `idx`'s answer. False if there's none (they left, or
+// the host stopped waiting); otherwise `chosen` is false if they backed
+// out, else their species, job and weapon.
+bool lan_host_choice(int idx, bool &chosen, int &species, int &job,
+                     int &weapon);
+
 // Is any remote seat connected?
 bool lan_active();
 

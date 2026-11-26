@@ -44,6 +44,16 @@ $header = @(
     ""
 )
 Set-Content $rc ($header + (Get-Content (Join-Path $PSScriptRoot "lan-smoke-host.lua.rc")))
+# The client makes its own character (with -Choose), so it has an rc too.
+$clientRc = "$work\client.rc"
+Set-Content $clientRc @(
+    "tile_full_screen = false",
+    "tile_skip_title = true",
+    "tile_window_width = 1024",
+    "tile_window_height = 700",
+    "save_dir = $($work -replace '\\','/')/client-saves",
+    "morgue_dir = $($work -replace '\\','/')/client-morgue"
+)
 
 # Tiles can't redirect stderr on Windows; crawl.stderr also writes here.
 $env:CRAWL_STDERR_FILE = $hostLog
@@ -53,7 +63,7 @@ $h = Start-Process cmd.exe -ArgumentList "/c", "`"`"$exe`" -wizard -rc `"$rc`" -
         -WorkingDirectory $src -WindowStyle Minimized -PassThru
 $env:CRAWL_STDERR_FILE = $null
 $env:CRAWL_LAN_AUTOSTART = $null
-$c = Start-Process cmd.exe -ArgumentList "/c", "`"`"$exe`" -lan-join 127.0.0.1:$Port -lan-script $ClientKeys -lan-dump `"$Out\client.bmp`" > `"$clientLog`" 2>&1`"" `
+$c = Start-Process cmd.exe -ArgumentList "/c", "`"`"$exe`" -rc `"$clientRc`" -lan-join 127.0.0.1:$Port -lan-script $ClientKeys -lan-dump `"$Out\client.bmp`" > `"$clientLog`" 2>&1`"" `
         -WorkingDirectory $src -WindowStyle Minimized -PassThru
 
 $deadline = (Get-Date).AddSeconds($TimeoutSec)

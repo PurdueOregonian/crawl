@@ -343,14 +343,6 @@ int main(int argc, char *argv[])
         term_colours[col.colour_index] = col.colour_def;
 #endif
 
-    // -lan-join: this copy is only a window onto the host's game (see
-    // lan.h).
-    if (lan_join_requested())
-    {
-        lan_run_client(lan_join_address());
-        end(0);
-    }
-
     _launch_game_loop();
     if (crawl_state.last_game_exit.message.size())
         end(0, false, "%s\n", crawl_state.last_game_exit.message.c_str());
