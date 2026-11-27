@@ -1,0 +1,33 @@
+<
+-- Party save test, run 2: the save from run 1 is loaded. Record everyone's
+-- state (the runner compares it with run 1's), then play a round to check
+-- the party still works.
+local step = 0
+local passes = 0
+local function d(code) return crawl.call_dlua(code) end
+local function log(s) crawl.stderr("SMOKE " .. s .. "\n") end
+local function state()
+  return d([[local s = string.format("size=%d active=%d", party.size(), party.active())
+    for i = 1, party.size() do
+      local x, y = party.pos(i)
+      local xl = party.xp(i)
+      s = s .. string.format(" | p%d %s hp=%d xl=%d at (%d,%d) %s", i,
+        party.species(i), party.hp(i), xl, x, y, party.where(i))
+    end
+    return s]])
+end
+function ready()
+  passes = passes + 1
+  if passes > 100 then log("GAVE UP " .. state()); return end
+  if step == 0 then
+    log("AFTER " .. state())
+    step = 1
+    crawl.sendkeys("s")       -- player 2 waits: the round ends
+  elseif step == 1 then
+    if d("return party.active()") ~= 1 then log("FAIL turn did not pass after loading"); return end
+    log("ROUND OK " .. state())
+    step = 2
+    log("DONE")
+  end
+end
+>

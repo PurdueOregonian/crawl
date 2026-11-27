@@ -1596,6 +1596,21 @@ void Menu::do_menu()
     ui::pop_layout();
 }
 
+shared_ptr<ui::Popup> Menu::overlay_popup()
+{
+    m_overlay_done = false;
+    m_ui.popup = make_shared<UIMenuPopup>(m_ui.vbox, this);
+    m_ui.popup->on_keydown_event([this](const KeyEvent& ev) {
+        const int key = remap_numpad ? numpad_to_regular(ev.key(), true)
+                                     : ev.key();
+        m_overlay_done = !process_key(key);
+        return true;
+    });
+    update_menu();
+    alive = true;
+    return m_ui.popup;
+}
+
 bool Menu::is_set(int flag) const
 {
     return (flags & flag) == flag;

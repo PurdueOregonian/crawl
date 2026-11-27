@@ -51,16 +51,40 @@ string lan_host_addresses();
 bool lan_host_lobby();
 // The party size the lobby settled on, or 0 if no lobby was held.
 int lan_lobby_party_size();
+// Continuing a saved party game: wait for the computers of the players who
+// had their own (see party.h) to join again, carrying on once they all have
+// or when the host says so; any still missing are then played at the host.
+// A joiner with a copy of this game gets the player it says they were;
+// anyone else gets the next player nobody has. The host may also give up
+// (stop), or delete the game instead (then the caller deletes it and calls
+// lan_host_end_game(), which still has everyone who joined).
+struct party_save_info;
+enum class lan_resume { play, stop, delete_game };
+lan_resume lan_host_resume_lobby(const party_save_info &info);
 // Stop hosting: drop everyone and stop listening.
 void lan_host_stop();
+// Saving and quitting: party member `idx`'s copy of the save (see party.h),
+// with them as its main player; lan_host_end_game() sends it to them.
+void lan_host_add_copy(int idx, const string &filename, const string &data);
+// The hosted game is over (saved, lost, quit...): tell every remote player
+// why, which sends them back to their start menu, and stop hosting. Each
+// gets their copy (if one was added), or with `delete_copies` (it's over for
+// good) deletes their copies of game `game_id`.
+void lan_host_end_game(const string &why, const string &game_id,
+                       bool delete_copies = false);
+// The name the player of party member `idx` gave at their own computer, or
+// "" (not remote, or none given).
+string lan_player_name(int idx);
 
 // Start menu "Join LAN Game": ask for the host's address, then join.
-void lan_join_menu();
+// `name`: the name the player typed in the start menu (their character's
+// name, if the game is new), or "".
+void lan_join_menu(const string &name);
 
 // Be a window onto the game hosted at `address` (host[:port]) until the
 // host goes away, the player cancels, or the window is closed. Runs in the
-// game window, so it needs tiles.initialise() first.
-void lan_run_client(const string &address);
+// game window, so it needs tiles.initialise() first. `name` as above.
+void lan_run_client(const string &address, const string &name);
 // The address given with -lan-join.
 const string &lan_join_address();
 

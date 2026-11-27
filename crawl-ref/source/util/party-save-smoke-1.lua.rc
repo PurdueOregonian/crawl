@@ -1,0 +1,40 @@
+<
+-- Party save test, run 1: make a party of two different characters, let
+-- player 1 act so it's player 2's turn, record everyone's state and save.
+local step = 0
+local passes = 0
+local function d(code) return crawl.call_dlua(code) end
+local function log(s) crawl.stderr("SMOKE " .. s .. "\n") end
+local function state()
+  return d([[local s = string.format("size=%d active=%d", party.size(), party.active())
+    for i = 1, party.size() do
+      local x, y = party.pos(i)
+      local xl = party.xp(i)
+      s = s .. string.format(" | p%d %s hp=%d xl=%d at (%d,%d) %s", i,
+        party.species(i), party.hp(i), xl, x, y, party.where(i))
+    end
+    return s]])
+end
+function ready()
+  passes = passes + 1
+  if passes > 100 then log("GAVE UP " .. state()); return end
+  if step == 0 then
+    -- A Troll Fighter next to player 1.
+    local ok = d([[local px, py = you.pos()
+      local x = px > 40 and px - 1 or px + 1
+      dgn.grid(x, py, "floor")
+      party.add_character(x, py, "TrFi", "unarmed")
+      return party.size() == 2]])
+    if not ok then log("FAIL no room for player 2"); return end
+    d("party.set_hp(2, 5)")
+    log("MADE " .. state())
+    step = 1
+    crawl.sendkeys("s")       -- player 1 waits: player 2's turn
+  elseif step == 1 then
+    if d("return party.active()") ~= 2 then log("FAIL turn did not pass"); return end
+    log("BEFORE " .. state())
+    step = 2
+    crawl.do_commands({"CMD_SAVE_GAME_NOW"})
+  end
+end
+>

@@ -40,6 +40,7 @@
 #include "mutation.h"
 #include "newgame.h"
 #include "ng-input.h"
+#include "prompt.h"
 #include "ng-setup.h"
 #include "notes.h"
 #include "output.h"
@@ -745,6 +746,8 @@ public:
 
     bool done;
     bool end_game;
+    // Show the menu again, made afresh (see MENU_LAN_JOIN).
+    bool reopen = false;
     virtual shared_ptr<Widget> get_child_at_offset(int, int) override {
         return m_root;
     }
@@ -994,6 +997,22 @@ void UIStartupMenu::menu_item_activated(int id)
         trim_string(input_string);
         if (!is_good_name(input_string, true))
             return;
+        // Hosting starts a new game; a saved game by this name would be
+        // loaded instead (its own menu entry is for that).
+        // (By file: on Windows, names differing only in case clash too.)
+        const string clash = input_string.empty()
+                             ? "" : get_save_filename(input_string);
+        if (!clash.empty() && save_exists(clash))
+        {
+            if (!yesno(("There is already a saved game called "
+                        + input_string + ".\nDelete it and host a new game? "
+                        "(To keep it, choose another name.)").c_str(),
+                       true, 'n'))
+            {
+                return;
+            }
+            delete_save_file(clash);
+        }
         string err;
         if (!lan_host_start(LAN_DEFAULT_PORT, err))
         {
@@ -1008,9 +1027,18 @@ void UIStartupMenu::menu_item_activated(int id)
     }
 
     case MENU_LAN_JOIN:
-        lan_join_menu();
+        trim_string(input_string);
+        lan_join_menu(input_string);
+        // (A copy of the game is saved under this name: have it chosen.)
+        if (is_good_name(input_string, false))
+            crawl_state.default_startup_name = input_string;
+        // Back from the game: start the menu over, as the saved games may
+        // have changed (a copy of the LAN game, or one deleted).
+        done = true;
         if (crawl_state.seen_hups)
-            done = end_game = true;
+            end_game = true;
+        else
+            reopen = true;
         return;
 
     default:
@@ -1046,10 +1074,15 @@ static void _show_startup_menu(newgame_def& ng_choice,
     tiles_crt_popup show_as_popup;
 #endif
 
-    auto startup_ui = make_shared<UIStartupMenu>(ng_choice, defaults);
-    auto popup = make_shared<ui::Popup>(startup_ui);
-
-    ui::run_layout(std::move(popup), startup_ui->done);
+    shared_ptr<UIStartupMenu> startup_ui;
+    do
+    {
+        startup_ui = make_shared<UIStartupMenu>(ng_choice, defaults);
+        auto popup = make_shared<ui::Popup>(startup_ui);
+        ui::run_layout(std::move(popup), startup_ui->done);
+    }
+    while (startup_ui->reopen && !startup_ui->end_game
+           && !crawl_state.seen_hups);
 
     if (startup_ui->end_game || crawl_state.seen_hups)
     {
@@ -1090,10 +1123,21 @@ bool startup_step()
     // -lan-join: this copy is only a window onto the host's game (see
     // lan.h). It can make its own character, so it needs the databases
     // loaded above.
+    // Once the host's game is over, carry on to the start menu (unless the
+    // window was closed).
     if (lan_join_requested())
     {
-        lan_run_client(lan_join_address());
-        end(0);
+        const string address = lan_join_address();
+        lan_request_join("");
+        // (The name, if any, from the options or -name.)
+        lan_run_client(address, choice.name);
+        if (crawl_state.seen_hups)
+            end(0);
+        if (is_good_name(choice.name, false))
+            crawl_state.default_startup_name = choice.name;
+        // Show the start menu even with a name given (which would otherwise
+        // skip it and load the copy of the game just received).
+        crawl_state.last_game_exit.exit_reason = game_exit::abort;
     }
 
     newgame_def defaults = read_startup_prefs();
@@ -1166,21 +1210,51 @@ bool startup_step()
         run_arena(choice, defaults.arena_teams); // this is NORETURN
     }
 
-    // Hosting a LAN game: everyone joins before anything else happens.
-    if (lan_host_requested() && !lan_active()
-        && !lan_host_lobby())
+    if (choice.filename.empty() && !choice.name.empty())
+        choice.filename = get_save_filename(choice.name);
+
+    // Continuing a party game: if some players were at other computers when
+    // it was saved, host it again and wait for them.
+    party_save_info saved_party;
+    const bool resuming = saved_party_info(choice.filename, saved_party);
+    bool had_remote = false;
+    for (bool r : saved_party.remote)
+        had_remote = had_remote || r;
+#ifdef USE_TILE_LOCAL
+    if (resuming && had_remote && !lan_host_requested())
     {
-        game_ended(game_exit::abort);
+        string err;
+        if (!lan_host_start(LAN_DEFAULT_PORT, err))
+            _lan_message(err + "\nThe other players will play here instead.");
+    }
+#endif
+
+    // Hosting a LAN game: everyone joins before anything else happens.
+    if (lan_host_requested() && !lan_active())
+    {
+        const lan_resume go = resuming ? lan_host_resume_lobby(saved_party)
+                              : lan_host_lobby() ? lan_resume::play
+                                                 : lan_resume::stop;
+        if (go == lan_resume::delete_game)
+        {
+            // This save, and the copies of whoever joined meanwhile.
+            party_delete_copy(saved_party.game_id);
+            delete_save_file(choice.filename);
+            lan_host_end_game("The host deleted this game.",
+                              saved_party.game_id, true);
+            game_ended(game_exit::abort, "The game was deleted.");
+        }
+        if (go == lan_resume::stop)
+            game_ended(game_exit::abort);
     }
     // Everyone makes their character at once: the other computers start
-    // now, while player 1 does below.
-    if (lan_active() && Options.party_choose_characters)
+    // now, while player 1 does below. (Not when continuing: they have
+    // theirs.)
+    if (lan_active() && Options.party_choose_characters && !resuming)
         lan_host_begin_choosing();
 
     bool newchar = false;
     newgame_def ng;
-    if (choice.filename.empty() && !choice.name.empty())
-        choice.filename = get_save_filename(choice.name);
 
     if (save_exists(choice.filename) && restore_game(choice.filename))
         save_player_name();

@@ -403,6 +403,26 @@ static void _launch_game_loop()
         {
             game_ended = true;
             crawl_state.last_game_exit = ge;
+            // Send any LAN players back to their start menu rather than
+            // leave them looking at a game that's gone. A save goes with
+            // them (each keeps a copy to carry on from, made by
+            // save_game()); a game that's over for good takes their copies
+            // with it.
+            {
+                const game_exit why = ge.exit_reason;
+                const bool saved = why == game_exit::save;
+                const bool over = why == game_exit::death
+                                  || why == game_exit::win
+                                  || why == game_exit::quit
+                                  || why == game_exit::leave;
+                lan_host_end_game(
+                    saved ? "The host saved the game. To carry on, one of "
+                            "you loads it\nand the others choose Join LAN "
+                            "Game."
+                    : over ? "The game is over."
+                           : "The host has left the game.",
+                    party_game_id(), over);
+            }
             _reset_game();
 
             // Don't re-enter the Sprint menu with restart_after_save, as
@@ -473,11 +493,15 @@ NORETURN static void _launch_game()
     party_reset();
     // Hosting a LAN game means at least one other player.
     const int party_players = party_planned_size();
-    if (party_players > 1)
+    // A saved party comes back as it was.
+    if (!game_start && party_resume())
+    {
+    }
+    else if (party_players > 1)
     {
         if (!game_start)
-            mprf(MSGCH_WARN, "Party members aren't saved yet; they rejoin as "
-                             "copies of you.");
+            mprf(MSGCH_WARN, "This game was saved without a party; the "
+                             "others join as copies of you.");
         // New game: each extra player picks their own character, unless
         // party_choose_characters = false (then they're copies of you).
         party_start(party_players,

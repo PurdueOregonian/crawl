@@ -6,8 +6,16 @@
  * Wire format (TCP, little-endian): each message is a 1-byte type, a 4-byte
  * payload length, then the payload.
  *   client -> host  'H' hello: the client's version string
+ *                   'J' its copies of party games (sent after 'H'): u32
+ *                       count, then each: string game id, u32 owner (from
+ *                       0), u32 save counter; then string its player's
+ *                       name ("": none). (Strings: u32 length, bytes.)
  *                   'E' an input event (struct net_event)
  *   host -> client  'W' welcome: u32 seat, u32 player number (1-based)
+ *                   'V' the game was saved, here's your copy: string file
+ *                       name, string game id, u32 owner, then the save
+ *                   'D' the game is over: delete your copies of string
+ *                       game id
  *                   'F' frame: u32 w, u32 h, u8 keyframe, zlib data of
  *                       w*h RGB bytes, top row first; a non-keyframe is
  *                       XORed with the previous frame
@@ -22,18 +30,31 @@
 #include <cerrno>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <vector>
 
 #include "cio.h"
+#include "artefact.h"
+#include "colour.h"
+#include "database.h"
+#include "describe.h"
+#include "describe-spells.h"
+#include "invent.h"
+#include "item-name.h"
+#include "menu.h"
+#include "player.h"
 #include "libutil.h"
 #include "end.h"
+#include "files.h"
 #include "message.h"
 #include "newgame.h"
 #include "newgame-def.h"
+#include "ng-input.h"
 #include "options.h"
 #include "output.h"
 #include "party.h"
 #include "state.h"
+#include "syscalls.h"
 #include "ui.h"
 #include "stringutil.h"
 #include "unwind.h"
@@ -87,6 +108,11 @@ namespace
     string join_address;          // -lan-join
     string client_script;
     string client_dump;
+    // A client: the name its player gave (their character's name).
+    string client_name;
+    // The host, saving and quitting: each remote player's copy of the save,
+    // by party index: its file name and contents.
+    std::map<int, std::pair<string, string>> pending_copies;
     // A client is making its character in its own window (the host asked).
     bool client_choosing = false;
 
@@ -135,6 +161,64 @@ namespace
         return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24);
     }
 
+    void _put_string(vector<uint8_t> &b, const string &s)
+    {
+        _put32(b, s.size());
+        b.insert(b.end(), s.begin(), s.end());
+    }
+
+    // Reading a payload a field at a time; `ok` goes false if it runs out.
+    struct unpacker
+    {
+        const vector<uint8_t> &p;
+        size_t at = 0;
+        bool ok = true;
+
+        explicit unpacker(const vector<uint8_t> &payload) : p(payload) {}
+
+        uint32_t u32()
+        {
+            if (!ok || p.size() - at < 4)
+            {
+                ok = false;
+                return 0;
+            }
+            at += 4;
+            return _get32(&p[at - 4]);
+        }
+
+        string str()
+        {
+            const uint32_t n = u32();
+            if (!ok || p.size() - at < n)
+            {
+                ok = false;
+                return "";
+            }
+            at += n;
+            return string(p.begin() + (at - n), p.begin() + at);
+        }
+
+        string rest()
+        {
+            const size_t from = at;
+            at = p.size();
+            return ok ? string(p.begin() + from, p.end()) : "";
+        }
+    };
+
+    // For scripted tests (like crawl.stderr(); see util/lan-copy-smoke.ps1):
+    // Tiles on Windows has no stderr to read.
+    void _test_log(const string &text)
+    {
+        if (const char *path = getenv("CRAWL_STDERR_FILE"))
+            if (FILE *f = fopen_u(path, "a"))
+            {
+                fprintf(f, "%s\n", text.c_str());
+                fclose(f);
+            }
+    }
+
     void _set_blocking(sock_t s, bool blocking)
     {
 #ifdef TARGET_OS_WINDOWS
@@ -174,6 +258,31 @@ namespace
             s = sock;
             _no_delay(s);
             _set_blocking(s, false);
+        }
+
+        // Done sending (everything flushed): say so, and wait up to `ms` for
+        // the other end to hang up, throwing away whatever it still sends,
+        // before closing. Closing with unread input would reset the
+        // connection, which can lose what we sent last.
+        void hang_up(int ms)
+        {
+            if (!ok())
+                return;
+#ifdef TARGET_OS_WINDOWS
+            shutdown(s, SD_SEND);
+#else
+            shutdown(s, SHUT_WR);
+#endif
+            for (int waited = 0; waited < ms; waited += 10)
+            {
+                if (!_readable(s, 10))
+                    continue;
+                char buf[4096];
+                const int got = ::recv(s, buf, sizeof(buf), 0);
+                if (got == 0 || got < 0 && !_would_block())
+                    break;
+            }
+            close();
         }
 
         void close()
@@ -237,7 +346,12 @@ namespace
                     break;
                 if (got <= 0)
                 {
-                    close();
+                    // Gone, but what it sent before going (e.g. why) can
+                    // still be read with next().
+                    _close_sock(s);
+                    s = BAD_SOCK;
+                    out.clear();
+                    out_pos = 0;
                     return false;
                 }
                 in.insert(in.end(), buf, buf + got);
@@ -319,12 +433,12 @@ void lan_set_client_dump(const string &path)
 #ifndef USE_TILE_LOCAL
 
 // LAN play needs local tiles: frames are read back from the GL window.
-void lan_run_client(const string &/*address*/)
+void lan_run_client(const string &/*address*/, const string &/*name*/)
 {
     fprintf(stderr, "LAN play needs the Tiles build of Crawl.\n");
 }
 
-void lan_join_menu()
+void lan_join_menu(const string &/*name*/)
 {
     mprf(MSGCH_ERROR, "LAN play needs the Tiles build of Crawl.");
 }
@@ -348,8 +462,18 @@ bool lan_host_wait_for_player(int /*idx*/)
 }
 
 bool lan_host_lobby() { return true; }
+lan_resume lan_host_resume_lobby(const party_save_info &)
+{
+    return lan_resume::play;
+}
 int lan_lobby_party_size() { return 0; }
 void lan_host_stop() { host_port = -1; }
+void lan_host_end_game(const string &, const string &, bool)
+{
+    host_port = -1;
+}
+void lan_host_add_copy(int, const string &, const string &) {}
+string lan_player_name(int) { return ""; }
 bool lan_active() { return false; }
 int lan_seat_of_player(int /*idx*/) { return 0; }
 int lan_output_seat() { return 0; }
@@ -364,6 +488,345 @@ bool lan_host_choice(int, bool &, int &, int &, int &) { return false; }
 
 namespace
 {
+    // ------------------------------------------------- off-turn inventory
+    //
+    // While it isn't their turn, a player can look at their inventory as it
+    // stood after the last move ('i'): a real inventory menu, describing an
+    // item when it's chosen, but nothing can be used from it. The host
+    // makes a snapshot of each waiting player's inventory (only it has the
+    // game) and sends it to their computer; the menu is drawn over the
+    // window without stopping anything, so the game goes on meanwhile.
+
+    struct inv_item
+    {
+        string name;            // "a - a +0 flail (weapon)"
+        int colour = -1;        // menu colour (-1: default)
+        vector<tile_def> tiles;
+        string title;           // description popup's title
+        string desc;            // its text, with colour tags
+    };
+
+    struct inv_snapshot
+    {
+        string title;
+        vector<inv_item> items;
+    };
+
+    void _put_str(vector<uint8_t> &b, const string &s)
+    {
+        _put_string(b, s);
+    }
+
+    vector<uint8_t> _pack(const inv_snapshot &s)
+    {
+        vector<uint8_t> b;
+        _put_str(b, s.title);
+        _put32(b, s.items.size());
+        for (const inv_item &it : s.items)
+        {
+            _put_str(b, it.name);
+            _put32(b, (uint32_t)it.colour);
+            _put32(b, it.tiles.size());
+            for (const tile_def &t : it.tiles)
+            {
+                _put32(b, t.tile);
+                _put32(b, (uint32_t)t.ymax);
+            }
+            _put_str(b, it.title);
+            _put_str(b, it.desc);
+        }
+        return b;
+    }
+
+    bool _unpack(const vector<uint8_t> &b, inv_snapshot &s)
+    {
+        unpacker u{b};
+        s.title = u.str();
+        s.items.clear();
+        const uint32_t n = u.u32();
+        for (uint32_t i = 0; u.ok && i < n && i < 1000; ++i)
+        {
+            inv_item it;
+            it.name = u.str();
+            it.colour = (int)u.u32();
+            const uint32_t nt = u.u32();
+            for (uint32_t j = 0; u.ok && j < nt && j < 16; ++j)
+            {
+                const tileidx_t tile = u.u32();
+                const int ymax = (int)u.u32();
+                it.tiles.emplace_back(tile, ymax);
+            }
+            it.title = u.str();
+            it.desc = u.str();
+            s.items.push_back(std::move(it));
+        }
+        return u.ok;
+    }
+
+    // The swapped-in player's item names, in inventory order: when these
+    // haven't changed, neither has much else worth resending.
+    string _inventory_key()
+    {
+        string key = make_stringf("%d|", you.gold);
+        for (int obj = 0; obj < NUM_OBJECT_CLASSES; obj++)
+            for (const auto &item : you.inv)
+                if (item.defined() && item.base_type == inv_order[obj])
+                    key += item.name(DESC_INVENTORY_EQUIP) + "|";
+        return key;
+    }
+
+    // The swapped-in player's inventory, with each item's description.
+    inv_snapshot _inventory_snapshot(const string &who)
+    {
+        inv_snapshot s;
+        s.title = make_stringf("%s's inventory: %s, %d gold", who.c_str(),
+                               slot_description().c_str(), you.gold);
+        for (int obj = 0; obj < NUM_OBJECT_CLASSES; obj++)
+        {
+            const int cls = inv_order[obj];
+            bool header = false;
+            for (const auto &item : you.inv)
+            {
+                if (!item.defined() || item.base_type != cls)
+                    continue;
+                if (!header)
+                {
+                    // A category heading (no letter, no tiles).
+                    inv_item h;
+                    h.name = item_class_name(cls);
+                    s.items.push_back(h);
+                    header = true;
+                }
+                inv_item it;
+                it.name = item.name(DESC_INVENTORY_EQUIP);
+                it.colour = menu_colour(it.name, item_prefix(item, false),
+                                        "pickup", false);
+                get_tiles_for_item(item, it.tiles, true);
+
+                // As describe_item_popup() has it.
+                it.title = it.name + ".";
+                string desc = get_item_description(item);
+                const string quote = is_unrandom_artefact(item)
+                                     && item.is_identified()
+                    ? getQuoteString(get_artefact_name(item))
+                    : getQuoteString(item.name(DESC_DBNAME, true, false,
+                                               false));
+                if (!quote.empty())
+                    desc += "\n_________________\n\n<darkgrey>" + quote
+                            + "</darkgrey>";
+                formatted_string fs = formatted_string::parse_string(desc);
+                formatted_string spells_desc;
+                describe_spellset(item_spellset(item), &item, spells_desc,
+                                  nullptr);
+                fs += spells_desc;
+                it.desc = fs.trim().to_colour_string(LIGHTGREY);
+                s.items.push_back(std::move(it));
+            }
+        }
+        return s;
+    }
+
+    class offturn_menu : public Menu
+    {
+    public:
+        offturn_menu()
+            : Menu(MF_SINGLESELECT | MF_ALLOW_FORMATTING | MF_INIT_HOVER
+                   | MF_SHOW_EMPTY | MF_ARROWS_SELECT)
+        {
+        }
+
+        bool process_key(int key) override
+        {
+            // 'i' closes it again, like Escape.
+            if (key == 'i' || key == 'I')
+                return false;
+            return Menu::process_key(key);
+        }
+
+        int hovered() const { return last_hovered; }
+    };
+
+    class offturn_inventory
+    {
+    public:
+        bool has_snapshot() const { return have; }
+        bool is_open() const { return menu != nullptr; }
+
+        void set(const inv_snapshot &s)
+        {
+            snap = s;
+            have = true;
+            if (!menu)
+                return;
+            const int hover = menu->hovered();
+            _fill();
+            menu->update_menu(true);
+            if (hover >= 0)
+                menu->set_hovered(min(hover, (int)menu->item_count() - 1));
+            if (desc && (described < 0
+                         || described >= (int)snap.items.size()
+                         || snap.items[described].title != desc_title))
+            {
+                desc = nullptr;     // that item has gone (or changed)
+            }
+        }
+
+        void open()
+        {
+            if (!have)
+                return;
+            menu = make_unique<offturn_menu>();
+            menu->on_single_selection = [this](const MenuEntry &me) {
+                _describe(*static_cast<const int *>(me.data));
+                return true;
+            };
+            _fill();
+            popup = menu->overlay_popup();
+        }
+
+        void close()
+        {
+            desc = nullptr;
+            popup = nullptr;
+            menu = nullptr;
+            indices.clear();
+        }
+
+        // Draw it over whatever the window shows.
+        void draw()
+        {
+            if (!is_open())
+                return;
+            _with_layouts([] { ui::force_render(); });
+        }
+
+        // Handle one input event (then draw, unless that closed it).
+        void handle(const SDL_Event &event)
+        {
+            if (!is_open())
+                return;
+            // Back in the queue, for the UI's own event handling (which
+            // also turns key presses into keys) to take out again.
+            SDL_Event copy = event;
+            SDL_PushEvent(&copy);
+            _with_layouts([] { ui::pump_events(0); });
+            if (desc_done)
+                desc = nullptr;
+            if (menu->overlay_done() || crawl_state.seen_hups)
+                close();
+            else
+                draw();
+        }
+
+    private:
+        inv_snapshot snap;
+        bool have = false;
+        unique_ptr<offturn_menu> menu;
+        shared_ptr<ui::Popup> popup;
+        shared_ptr<ui::Popup> desc;
+        bool desc_done = false;
+        int described = -1;
+        string desc_title;
+        // Entry data: each item's index in snap.items.
+        vector<unique_ptr<int>> indices;
+
+        void _fill()
+        {
+            menu->clear();
+            indices.clear();
+            menu->set_title(new MenuEntry(snap.title + "  <lightgrey>(not "
+                "your turn: look only)</lightgrey>", MEL_TITLE));
+            for (int i = 0; i < (int)snap.items.size(); ++i)
+            {
+                const inv_item &it = snap.items[i];
+                const bool heading = it.title.empty();
+                const int hotkey = !heading && it.name.size() > 4
+                                   && it.name.compare(1, 3, " - ") == 0
+                    ? it.name[0] : 0;
+                // The menu puts the letter in front itself.
+                auto me = make_unique<MenuEntry>(
+                    replace_all(hotkey ? it.name.substr(4) : it.name, "<",
+                                "<<"),
+                    heading ? MEL_SUBTITLE : MEL_ITEM, 1, hotkey);
+                if (!heading)
+                {
+                    if (it.colour != -1)
+                        me->colour = it.colour;
+                    for (const tile_def &t : it.tiles)
+                        me->add_tile(t);
+                    indices.push_back(make_unique<int>(i));
+                    me->data = indices.back().get();
+                }
+                menu->add_entry(std::move(me));
+            }
+        }
+
+        void _describe(int i)
+        {
+            if (i < 0 || i >= (int)snap.items.size())
+                return;
+            const inv_item &it = snap.items[i];
+            described = i;
+            desc_title = it.title;
+            desc_done = false;
+
+            auto vbox = make_shared<ui::Box>(ui::Widget::VERT);
+            auto title_hbox = make_shared<ui::Box>(ui::Widget::HORZ);
+            if (!it.tiles.empty())
+            {
+                auto stack = make_shared<ui::Stack>();
+                for (const tile_def &t : it.tiles)
+                {
+                    auto icon = make_shared<ui::Image>();
+                    icon->set_tile(t);
+                    stack->add_child(std::move(icon));
+                }
+                title_hbox->add_child(std::move(stack));
+            }
+            auto title = make_shared<ui::Text>(it.title);
+            title->set_margin_for_sdl(0, 0, 0, 10);
+            title_hbox->add_child(std::move(title));
+            title_hbox->set_cross_alignment(ui::Widget::CENTER);
+            title_hbox->set_margin_for_sdl(0, 0, 20, 0);
+            vbox->add_child(std::move(title_hbox));
+
+            auto scroller = make_shared<ui::Scroller>();
+            auto text = make_shared<ui::Text>(
+                formatted_string::parse_string(it.desc));
+            text->set_wrap_text(true);
+            scroller->set_child(text);
+            vbox->add_child(scroller);
+            auto footer = make_shared<ui::Text>(formatted_string(
+                "It isn't your turn: you can only look.", CYAN));
+            footer->set_margin_for_sdl(20, 0, 0, 0);
+            vbox->add_child(std::move(footer));
+            vbox->max_size().width = tiles.get_crt_font()->char_width() * 80;
+
+            desc = make_shared<ui::Popup>(std::move(vbox));
+            desc->on_keydown_event([this, scroller](const ui::KeyEvent& ev) {
+                if (ui::key_exits_popup(ev.key(), true) || ev.key() == 'i')
+                    return desc_done = true;
+                return scroller->on_event(ev);
+            });
+        }
+
+        // Run `fn` with the menu (and description) as the only layouts
+        // drawn, over a blank window.
+        void _with_layouts(const function<void()> &fn)
+        {
+            unwind_bool regions(ui::should_render_current_regions, false);
+            ui::cutoff_point cutoff;
+            ui::push_layout(popup, KMC_MENU);
+            const bool had_desc = desc != nullptr;
+            if (had_desc)
+                ui::push_layout(desc);
+            fn();
+            if (had_desc)
+                ui::pop_layout();
+            ui::pop_layout();
+        }
+    };
+
     // ---------------------------------------------------------------- host
 
     struct seat
@@ -389,6 +852,54 @@ namespace
         bool choosing = false;
         bool has_choice = false;
         vector<uint8_t> choice;
+        // What their last inventory snapshot ('I') was made from (see
+        // _inventory_key()).
+        string inv_key;
+        // Their copies of party games ('J'), for continuing a saved game:
+        // and who the copy of this one says they were (-1 if none), and how
+        // new that copy is.
+        bool claim_known = false;
+        vector<party_copy> copies;
+        int claim_player = -1;
+        int claim_generation = 0;
+        unsigned int joined_at = 0;
+        // The name they gave on their start menu ("" if none).
+        string name;
+
+        void take_copies(const vector<uint8_t> &p)
+        {
+            claim_known = true;
+            copies.clear();
+            unpacker u(p);
+            const uint32_t n = u.u32();
+            for (uint32_t c = 0; c < n && c < 1000 && u.ok; ++c)
+            {
+                party_copy pc;
+                pc.game_id = u.str();
+                pc.owner = u.u32();
+                pc.generation = u.u32();
+                if (u.ok)
+                    copies.push_back(pc);
+            }
+            const string their_name = u.str();
+            if (u.ok && is_good_name(their_name, false))
+                name = their_name;
+        }
+
+        // Before the game: take their 'J' (sent right after 'H') if it has
+        // come. True once it has (or it's too late for it to).
+        bool read_copies(unsigned int now)
+        {
+            uint8_t type;
+            vector<uint8_t> p;
+            while (!claim_known && conn.next(type, p))
+                if (type == 'J')
+                    take_copies(p);
+            // (Every version that can join sends it; just in case.)
+            if (!claim_known && now - joined_at > 10000)
+                claim_known = true;
+            return claim_known;
+        }
     };
 
     sock_t listener = BAD_SOCK;
@@ -402,6 +913,19 @@ namespace
     // Player 1 is still making their character (remote seats were asked to
     // choose at the same time).
     bool host_choosing = false;
+    // Player 1's inventory, to look at during a remote player's turn, and
+    // the host's last idle view (to put back after looking).
+    offturn_inventory host_inv;
+    string host_inv_key;
+    vector<uint8_t> host_frame;
+    int host_frame_w = 0, host_frame_h = 0;
+    // Keep each frame the host's screen is drawn (and, if capture_only, don't
+    // show it).
+    bool capture_host_frame = false;
+    bool capture_only = false;
+    // Handling the host's inventory menu: input still comes from the remote
+    // player whose turn it is.
+    bool host_menu_busy = false;
 
     // Who's still choosing a character, e.g. "Player 1 and Player 3" (""
     // if nobody).
@@ -508,11 +1032,37 @@ namespace
         }
     }
 
+    // The seat whose turn it is.
+    int _turn_seat()
+    {
+        return party_active() ? lan_seat_of_player(party_active_index()) : 0;
+    }
+
     int _live_seat()
     {
         if (seat_override >= 0)
             return seat_override;
-        return party_active() ? lan_seat_of_player(party_active_index()) : 0;
+        return _turn_seat();
+    }
+
+    // Read the back buffer: RGB, top row first.
+    void _read_back(int &w, int &h, vector<uint8_t> &px)
+    {
+        SDL_GL_GetDrawableSize(window, &w, &h);
+        if (w <= 0 || h <= 0)
+        {
+            px.clear();
+            return;
+        }
+        vector<uint8_t> raw((size_t)w * h * 3);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadBuffer(GL_BACK);
+        glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, raw.data());
+        // GL's rows go bottom-up.
+        px.resize(raw.size());
+        const size_t row = (size_t)w * 3;
+        for (int y = 0; y < h; ++y)
+            memcpy(&px[y * row], &raw[(h - 1 - y) * row], row);
     }
 
     void _send_frame(seat &s, int w, int h, vector<uint8_t> &px);
@@ -522,7 +1072,9 @@ namespace
     // whatever was waiting to go out.
     void _poll()
     {
-        const int live = _live_seat();
+        // (While the host works their inventory menu, the input that counts
+        // is still that of the player whose turn it is.)
+        const int live = host_menu_busy ? _turn_seat() : _live_seat();
         for (int k = 1; k < (int)seats.size(); ++k)
         {
             seat &s = seats[k];
@@ -543,7 +1095,9 @@ namespace
             vector<uint8_t> payload;
             while (s.conn.next(type, payload))
             {
-                if (type == 'P' && s.choosing)
+                if (type == 'J')
+                    s.take_copies(payload);
+                else if (type == 'P' && s.choosing)
                 {
                     s.choosing = false;
                     s.has_choice = true;
@@ -695,7 +1249,8 @@ void lan_set_window(SDL_Window *w)
 namespace
 {
     // Take a computer waiting to connect, if one turns up within `ms`, as
-    // the seat for party member `idx`. True if it joined.
+    // the seat for party member `idx` (-1: not yet decided, so not welcomed
+    // yet either). True if it joined.
     bool _accept_seat(int idx, int ms)
     {
         if (!_readable(listener, ms))
@@ -726,10 +1281,14 @@ namespace
             return false;
         }
         s.player = idx;
-        vector<uint8_t> welcome;
-        _put32(welcome, seats.size());
-        _put32(welcome, idx + 1);
-        s.conn.send_msg('W', welcome);
+        s.joined_at = SDL_GetTicks();
+        if (idx >= 0)
+        {
+            vector<uint8_t> welcome;
+            _put32(welcome, seats.size());
+            _put32(welcome, idx + 1);
+            s.conn.send_msg('W', welcome);
+        }
         seats.push_back(std::move(s));
         return true;
     }
@@ -884,13 +1443,21 @@ bool lan_host_lobby()
         }
         locals = min(locals, PARTY_MAX_SIZE - 1 - remotes);
         const int players = 1 + remotes + locals;
-        if (autostart > 0 && players >= autostart)
+        // Their names (and copies of saved games) come right after they
+        // join; the game needs the names.
+        bool all_in = true;
+        for (int k = 1; k <= remotes; ++k)
+            all_in = seats[k].read_copies(SDL_GetTicks()) && all_in;
+        if (autostart > 0 && players >= autostart && all_in)
             break;
 
         string list = "<white>Player 1</white>: you\n";
         for (int idx = 1; idx < players; ++idx)
         {
-            list += make_stringf("<white>Player %d</white>: %s\n", idx + 1,
+            const string who = idx <= remotes && !seats[idx].name.empty()
+                               ? " (" + seats[idx].name + ")" : "";
+            list += make_stringf("<white>Player %d</white>%s: %s\n", idx + 1,
+                                 who.c_str(),
                                  idx <= remotes
                                  ? "<lightgreen>joined</lightgreen>"
                                  : "<lightcyan>plays at this computer"
@@ -923,7 +1490,199 @@ bool lan_host_lobby()
     // Someone may have joined since the last look: keep the numbers tidy.
     remotes = (int)seats.size() - 1;
     lobby_party = min(1 + remotes + locals, PARTY_MAX_SIZE);
+    // Anyone whose name hasn't come yet: it's on its way (a moment at most).
+    for (int k = 1; k < (int)seats.size(); ++k)
+        while (seats[k].conn.ok() && !seats[k].read_copies(SDL_GetTicks())
+               && !crawl_state.seen_hups)
+        {
+            seats[k].conn.fill(20);
+        }
     return true;
+}
+
+lan_resume lan_host_resume_lobby(const party_save_info &info)
+{
+    lobby_party = 0;
+    // The players who had their own computers, in order: each joiner gets
+    // the one their copy of the game says they were, or else the first
+    // one nobody has.
+    vector<int> wanted;
+    for (int i = 0; i < info.size; ++i)
+        if (info.remote[i])
+            wanted.push_back(i);
+    if (wanted.empty() || !lan_host_requested())
+        return lan_resume::play;
+    if (!_listen())
+    {
+        mprf(MSGCH_ERROR, "Can't host on port %d (is it already in use?).",
+             host_port);
+        host_port = -1;
+        return lan_resume::play;
+    }
+
+    bool cancel = false, start_now = false, delete_game = false;
+    // 'D' once asks to make sure; 'D' again deletes.
+    bool delete_asked = false;
+    auto text = make_shared<ui::Text>();
+    text->set_margin_for_sdl(10);
+    auto popup = make_shared<ui::Popup>(text);
+    popup->on_keydown_event([&](const ui::KeyEvent& ev) {
+        const int key = ev.key();
+        if (key == 'D' || key == 'd')
+        {
+            if (delete_asked)
+                delete_game = true;
+            delete_asked = true;
+            return true;
+        }
+        delete_asked = false;
+        if (key == CK_ENTER || key == '\r' || key == '\n')
+            start_now = true;
+        else if (ui::key_exits_popup(key, false))
+            cancel = true;
+        return true;
+    });
+    ui::push_layout(popup);
+
+    const auto refuse = [](int k, const string &why) {
+        seats[k].conn.send_msg('R', vector<uint8_t>(why.begin(), why.end()));
+        seats[k].conn.flush();
+        seats[k].conn.hang_up(500);
+        seats.erase(seats.begin() + k);
+    };
+
+    const string how = _join_instructions();
+    while (!cancel && !start_now && !delete_game && !crawl_state.seen_hups)
+    {
+        const unsigned int now = SDL_GetTicks();
+        for (int k = (int)seats.size() - 1; k >= 1; --k)
+        {
+            seat &s = seats[k];
+            if (!s.conn.fill(0) || !s.conn.flush())
+            {
+                seats.erase(seats.begin() + k);
+                continue;
+            }
+            // Their copies (also taken by _poll(), which the UI's event
+            // loop runs).
+            s.read_copies(now);
+            // Who their copy of this game says they were (the newest, if
+            // they somehow have several).
+            s.claim_player = -1;
+            s.claim_generation = 0;
+            for (const party_copy &pc : s.copies)
+                if (!info.game_id.empty() && pc.game_id == info.game_id
+                    && pc.generation >= s.claim_generation)
+                {
+                    s.claim_player = pc.owner;
+                    s.claim_generation = pc.generation;
+                }
+        }
+
+        // Who plays whom: everyone whose copy says they were one of the
+        // players we're waiting for gets that player; the others get the
+        // rest in the order they joined.
+        vector<int> give(seats.size(), -1);
+        vector<bool> taken(info.size, false);
+        for (int k = 1; k < (int)seats.size(); ++k)
+        {
+            const int c = seats[k].claim_player;
+            if (seats[k].claim_known && c >= 0 && c < info.size
+                && info.remote[c] && !taken[c])
+            {
+                give[k] = c;
+                taken[c] = true;
+            }
+        }
+        for (int k = 1; k < (int)seats.size(); ++k)
+        {
+            if (!seats[k].claim_known || give[k] >= 0)
+                continue;
+            for (int idx : wanted)
+                if (!taken[idx])
+                {
+                    give[k] = idx;
+                    taken[idx] = true;
+                    break;
+                }
+        }
+        // More joined than there are players to give them: turn them away.
+        for (int k = (int)seats.size() - 1; k >= 1; --k)
+            if (seats[k].claim_known && give[k] < 0)
+            {
+                refuse(k, "This game has no more players to join as.");
+                give.erase(give.begin() + k);
+            }
+        int back = 0;
+        for (int k = 1; k < (int)seats.size(); ++k)
+        {
+            if (give[k] < 0)
+                continue;
+            ++back;
+            if (seats[k].player == give[k])
+                continue;
+            seats[k].player = give[k];
+            _test_log(make_stringf("LAN host: computer %d is Player %d (its "
+                                   "copy says %d)", k, give[k] + 1,
+                                   seats[k].claim_player + 1));
+            vector<uint8_t> welcome;
+            _put32(welcome, k);
+            _put32(welcome, give[k] + 1);
+            _put32(welcome, 1);     // continuing a saved game
+            seats[k].conn.send_msg('W', welcome);
+        }
+        // Everyone's back: carry on.
+        if (back == (int)wanted.size() && back == (int)seats.size() - 1)
+            break;
+
+        string list;
+        for (int i = 0; i < info.size; ++i)
+        {
+            const bool remote = info.remote[i];
+            const int k = remote ? lan_seat_of_player(i) : 0;
+            string state = !remote ? "<lightcyan>this computer</lightcyan>"
+                         : k > 0   ? "<lightgreen>back</lightgreen>"
+                                   : "<yellow>waiting...</yellow>";
+            if (k > 0 && seats[k].claim_player == i
+                && seats[k].claim_generation > info.generation)
+            {
+                state += " <lightred>(has a newer save of this game!)"
+                         "</lightred>";
+            }
+            list += make_stringf("<white>Player %d</white> (%s): %s\n", i + 1,
+                info.describe[i].c_str(), state.c_str());
+        }
+        text->set_text(formatted_string::parse_string(
+            "<cyan>Continuing a saved LAN game.</cyan> Waiting for the "
+            "players who were on other computers to join again.\n\n"
+            + how + "\n\n" + list + "\n"
+              "The game carries on once everyone is back.\n\n"
+              "<lightgrey>[Enter] carry on now (missing players play here)\n"
+              "[Esc] stop hosting\n"
+            + (delete_asked
+               ? "</lightgrey><lightred>[D] again: delete this game for "
+                 "good, here and the copies of everyone who has joined"
+                 "</lightred>"
+               : "[D] delete this game</lightgrey>")));
+        ui::pump_events(50);
+        if ((int)seats.size() - 1 < (int)wanted.size())
+            _accept_seat(-1, 50);
+    }
+    ui::pop_layout();
+
+    if (delete_game)
+        return lan_resume::delete_game;
+    if (cancel || crawl_state.seen_hups)
+    {
+        lan_host_stop();
+        return lan_resume::stop;
+    }
+    // Anyone who joined but has no player yet: no room for them.
+    for (int k = (int)seats.size() - 1; k >= 1; --k)
+        if (seats[k].player < 0)
+            refuse(k, "This game has no more players to join as.");
+    lobby_party = info.size;
+    return lan_resume::play;
 }
 
 void lan_host_stop()
@@ -935,6 +1694,73 @@ void lan_host_stop()
         _close_sock(listener);
     listener = BAD_SOCK;
     host_port = -1;
+}
+
+void lan_host_add_copy(int idx, const string &filename, const string &data)
+{
+    pending_copies[idx] = make_pair(filename, data);
+}
+
+void lan_host_end_game(const string &why, const string &game_id,
+                       bool delete_copies)
+{
+    bool any = false;
+    for (int k = 1; k < (int)seats.size(); ++k)
+    {
+        seat &s = seats[k];
+        if (!s.conn.ok())
+            continue;
+        any = true;
+        const auto copy_for = pending_copies.find(s.player);
+        if (copy_for != pending_copies.end() && !game_id.empty())
+        {
+            const string &data = copy_for->second.second;
+            vector<uint8_t> copy;
+            _put_string(copy, copy_for->second.first);
+            _put_string(copy, game_id);
+            _put32(copy, s.player);
+            copy.insert(copy.end(), data.begin(), data.end());
+            s.conn.send_msg('V', copy);
+        }
+        if (delete_copies && !game_id.empty())
+        {
+            vector<uint8_t> del;
+            _put_string(del, game_id);
+            s.conn.send_msg('D', del);
+        }
+        s.conn.send_msg('R', vector<uint8_t>(why.begin(), why.end()));
+    }
+    // A save is a few megabytes at most: wait (a while) for it all to go
+    // before hanging up.
+    const unsigned int start = SDL_GetTicks();
+    while (any && SDL_GetTicks() - start < 30000)
+    {
+        any = false;
+        for (int k = 1; k < (int)seats.size(); ++k)
+            if (seats[k].conn.flush() && seats[k].conn.backed_up())
+                any = true;
+        if (any)
+            SDL_Delay(5);
+    }
+    for (int k = 1; k < (int)seats.size(); ++k)
+        seats[k].conn.hang_up(3000);
+    pending_copies.clear();
+    lan_host_stop();
+}
+
+string lan_player_name(int idx)
+{
+    const int k = lan_seat_of_player(idx);
+    if (k <= 0)
+        return "";
+    // (It comes right after they join.)
+    seat &s = seats[k];
+    while (s.conn.ok() && !s.read_copies(SDL_GetTicks())
+           && !crawl_state.seen_hups)
+    {
+        s.conn.fill(20);
+    }
+    return s.name;
 }
 
 bool lan_host_wait_for_player(int idx)
@@ -1048,6 +1874,13 @@ bool lan_remote_input(int &x, int &y, uint32_t &buttons, uint16_t &mod)
 bool lan_present()
 {
     const int k = _live_seat();
+    if (k <= 0 && capture_host_frame && window)
+    {
+        _read_back(host_frame_w, host_frame_h, host_frame);
+        // Not shown: the host's inventory menu stays up.
+        if (capture_only)
+            return true;
+    }
     if (k <= 0 || !window)
         return false;
     seat &s = seats[k];
@@ -1055,18 +1888,10 @@ bool lan_present()
         return false;
 
     int w, h;
-    SDL_GL_GetDrawableSize(window, &w, &h);
-    if (w <= 0 || h <= 0)
+    vector<uint8_t> px;
+    _read_back(w, h, px);
+    if (px.empty())
         return true;
-    vector<uint8_t> raw((size_t)w * h * 3);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadBuffer(GL_BACK);
-    glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, raw.data());
-    // GL's rows go bottom-up.
-    vector<uint8_t> px(raw.size());
-    const size_t row = (size_t)w * 3;
-    for (int y = 0; y < h; ++y)
-        memcpy(&px[y * row], &raw[(h - 1 - y) * row], row);
     _send_frame(s, w, h, px);
     if (!s.conn.ok())
         _drop_seat(k, "disconnected");
@@ -1089,6 +1914,41 @@ bool lan_peek_remote(uint32_t sdl_type)
 namespace
 {
     bool _client_scripted_event(SDL_Event &event, int timeout);
+    void _draw_host_frame();
+
+    // Work the host's inventory menu (drawn on the host's screen) without
+    // losing the remote player's input.
+    void _host_menu(const function<void()> &fn)
+    {
+        if (!window)
+            return;
+        unwind_bool busy(host_menu_busy, true);
+        lan_seat_scope scope(0);
+        fn();
+    }
+
+    // The host's keyboard and mouse during a remote player's turn: 'i'
+    // opens player 1's inventory menu, which then takes them.
+    void _host_idle_input(const SDL_Event &event)
+    {
+        if (!party_active() || !crawl_state.need_save)
+            return;
+        if (host_inv.is_open())
+        {
+            _host_menu([&event] { host_inv.handle(event); });
+            if (!host_inv.is_open())
+                _draw_host_frame();
+        }
+        else if (event.type == SDL_TEXTINPUT
+                 && strcmp(event.text.text, "i") == 0
+                 && host_inv.has_snapshot())
+        {
+            _host_menu([] {
+                host_inv.open();
+                host_inv.draw();
+            });
+        }
+    }
 }
 
 bool lan_wait_event(SDL_Event &event, int timeout)
@@ -1106,6 +1966,9 @@ bool lan_wait_event(SDL_Event &event, int timeout)
     {
         _poll();
         const int k = _live_seat();
+        // The host's turn: the game's own screen replaces that menu.
+        if (host_inv.is_open() && _turn_seat() <= 0)
+            host_inv.close();
         if (k > 0 && !seats[k].events.empty())
         {
             seat &st = seats[k];
@@ -1137,9 +2000,13 @@ bool lan_wait_event(SDL_Event &event, int timeout)
         if (SDL_WaitEventTimeout(&event, 10))
         {
             // Someone else's turn: this keyboard and mouse do nothing (the
-            // window itself still works: focus, resizing, closing).
-            if (k > 0 && _is_input(event))
+            // window itself still works: focus, resizing, closing), except
+            // that 'i' shows player 1's inventory.
+            if (k > 0 && _is_input(event) && !host_menu_busy)
+            {
+                _host_idle_input(event);
                 continue;
+            }
             return true;
         }
         if (timeout != INT_MAX && (int)(SDL_GetTicks() - start) >= timeout)
@@ -1165,13 +2032,37 @@ void lan_refresh_idle_views(bool force)
     {
         if (k == live || k > 0 && !seats[k].conn.ok())
             continue;
-        // The host's own screen shows player 1 (and any other players
-        // played here, when it's their turn).
-        const int idx = k == 0 ? 0 : seats[k].player;
-        party_view_as(idx, [k] {
+        // The host's own screen shows its own player (player 1, or whoever
+        // loaded their copy of the game), and any other players played here
+        // when it's their turn.
+        const int idx = k == 0 ? party_home_player() : seats[k].player;
+        party_view_as(idx, [k, idx, force] {
             lan_seat_scope scope(k);
+            const bool menu_up = k == 0 && host_inv.is_open();
             redraw_screen();
-            tiles.redraw();
+            {
+                unwind_bool capture(capture_host_frame, k == 0);
+                // The host's inventory menu stays up over it.
+                unwind_bool hidden(capture_only, menu_up);
+                tiles.redraw();
+            }
+            // What they can look at with 'i' until it's their turn
+            // (descriptions and all, so only remade when it has changed or
+            // a turn has begun).
+            const string key = _inventory_key();
+            string &last = k == 0 ? host_inv_key : seats[k].inv_key;
+            if (force || key != last || k == 0 && !host_inv.has_snapshot())
+            {
+                last = key;
+                const inv_snapshot snap
+                    = _inventory_snapshot(party_member_name(idx));
+                if (k > 0)
+                    seats[k].conn.send_msg('I', _pack(snap));
+                else
+                    host_inv.set(snap);
+            }
+            if (menu_up)
+                _host_menu([] { host_inv.draw(); });
         });
         drew = true;
     }
@@ -1393,6 +2284,18 @@ namespace
         }
     };
 
+    void _draw_host_frame()
+    {
+        if (host_frame.empty() || !window)
+            return;
+        client_view v;
+        v.win = window;
+        v.frame = host_frame;
+        v.w = host_frame_w;
+        v.h = host_frame_h;
+        v.draw();
+    }
+
     bool _send_event(connection &c, const net_event &e)
     {
         vector<uint8_t> p(sizeof(e));
@@ -1482,6 +2385,52 @@ namespace
         }
     }
 
+    void _client_log(const string &text)
+    {
+        _test_log("LAN client: " + text);
+    }
+
+    // The host sent our copy of the game ('V') or said it's over ('D'):
+    // keep or delete it, and say what happened.
+    string _client_copy_message(uint8_t type, const vector<uint8_t> &p)
+    {
+        unpacker u(p);
+        if (type == 'D')
+        {
+            const string id = u.str();
+            return u.ok && party_delete_copy(id)
+                   ? "Your copy of the game has been deleted." : "";
+        }
+        const string filename = u.str();
+        const string id = u.str();
+        const int owner = u.u32();
+        const string data = u.rest();
+        if (!u.ok || data.empty())
+            return "The host's copy of the game didn't arrive whole.";
+        string err;
+        if (!party_store_copy(filename, id, owner, data, err))
+            return err;
+        return make_stringf("You have a copy of the game now (as Player %d): "
+                            "load it from the\nstart menu to host it "
+                            "yourself.", owner + 1);
+    }
+
+    // Our copies of party games, for the host: who we were in them.
+    vector<uint8_t> _client_claims()
+    {
+        vector<uint8_t> j;
+        const vector<party_copy> copies = party_copies();
+        _put32(j, copies.size());
+        for (const party_copy &pc : copies)
+        {
+            _put_string(j, pc.game_id);
+            _put32(j, pc.owner);
+            _put32(j, pc.generation);
+        }
+        _put_string(j, client_name);
+        return j;
+    }
+
     // A message in a popup; any key closes it.
     void _client_message(const string &text)
     {
@@ -1526,6 +2475,7 @@ namespace
         bool connected = false, got_frame = false;
         unsigned int next_try = 0;
         string err;
+        string copy_note;
         while (!cancel && !crawl_state.seen_hups && !got_frame)
         {
             ui::pump_events(50);
@@ -1549,15 +2499,17 @@ namespace
                 const string version = Version::Long;
                 c.send_msg('H', vector<uint8_t>(version.begin(),
                                                 version.end()));
+                // If the host is continuing a saved game, it gives us our
+                // own player back.
+                c.send_msg('J', _client_claims());
                 show("<white>Connected to " + address + ".</white>\n"
                      "Waiting for the host to let you in (they may still "
                      "be making their character)...");
             }
-            if (!c.fill(0) || !c.flush())
-            {
+            // (If the host has gone, still take its last messages: why.)
+            const bool alive = c.fill(0) && c.flush();
+            if (!alive)
                 why = "The host closed the connection.";
-                break;
-            }
             uint8_t type;
             vector<uint8_t> p;
             while (!got_frame && c.next(type, p))
@@ -1571,11 +2523,23 @@ namespace
                 else if (type == 'W' && p.size() >= 8)
                 {
                     player_no = _get32(&p[4]);
-                    show(make_stringf("<white>You're Player %d.</white>\n"
-                         "Waiting for the host to start the game (they may "
-                         "be waiting\nfor other players). Then everyone "
-                         "makes their character.", player_no));
+                    // (A third field: continuing a saved game.)
+                    if (p.size() >= 12 && _get32(&p[8]))
+                    {
+                        show(make_stringf("<white>You're Player %d.</white>\n"
+                             "Continuing a saved game: waiting for the "
+                             "others to join...", player_no));
+                    }
+                    else
+                    {
+                        show(make_stringf("<white>You're Player %d.</white>\n"
+                             "Waiting for the host to start the game (they "
+                             "may be waiting\nfor other players). Then "
+                             "everyone makes their character.", player_no));
+                    }
                 }
+                else if (type == 'D')
+                    copy_note = _client_copy_message(type, p);
                 else if (type == 'C' && player_no)
                 {
                     // Make our character here, while the others make
@@ -1586,7 +2550,9 @@ namespace
                     {
                         unwind_bool choosing(client_choosing, true);
                         chosen = choose_party_member(ng,
-                            make_stringf("Player %d", player_no));
+                            client_name.empty()
+                            ? make_stringf("Player %d", player_no)
+                            : client_name);
                     }
                     catch (const game_ended_condition &)
                     {
@@ -1623,6 +2589,8 @@ namespace
                 break;
         }
         ui::pop_layout();
+        if (!copy_note.empty())
+            why += (why.empty() ? "" : "\n\n") + copy_note;
         if (!got_frame)
         {
             c.close();
@@ -1632,11 +2600,12 @@ namespace
     }
 }
 
-void lan_run_client(const string &address)
+void lan_run_client(const string &address, const string &name)
 {
     if (!window)
         return;
     last_join_address = address;
+    client_name = is_good_name(name, false) ? name : "";
 
     connection c;
     string why;
@@ -1647,9 +2616,13 @@ void lan_run_client(const string &address)
     if (!player_no)
     {
         if (!why.empty())
+        {
+            _client_log(why);
             _client_message(why);
+        }
         return;
     }
+    _client_log(make_stringf("playing as Player %d", player_no));
 
     char *title = SDL_strdup(SDL_GetWindowTitle(window));
     int start_w, start_h;
@@ -1659,10 +2632,15 @@ void lan_run_client(const string &address)
     v.win = window;
     v.apply(first_frame);
     bool quit = false;
+    // What became of our copy of the game (see party.h), if anything.
+    string copy_note;
     string script = client_script;
     unsigned int last_frame_at = SDL_GetTicks();
     unsigned int last_saved = 0;
     bool dirty_save = false;
+    // Our inventory as of the host's last look (see
+    // lan_refresh_idle_views()), to look at while it isn't our turn.
+    offturn_inventory inv;
 
     const auto set_title = [&] {
         SDL_SetWindowTitle(window, make_stringf("Crawl LAN - Player %d%s",
@@ -1681,8 +2659,8 @@ void lan_run_client(const string &address)
     // Frames that arrive faster than we can draw are only drawn once.
     while (c.ok() && !quit)
     {
-        if (!c.flush() || !c.fill(5))
-            break;
+        // (If the host has gone, still take its last messages.)
+        const bool alive = c.flush() && c.fill(5);
         uint8_t type;
         vector<uint8_t> p;
         bool redraw = false;
@@ -1693,6 +2671,8 @@ void lan_run_client(const string &address)
                 why = string(p.begin(), p.end());
                 c.close();
             }
+            else if (type == 'V' || type == 'D')
+                copy_note = _client_copy_message(type, p);
             else if (type == 'F')
             {
                 if (v.apply(p))
@@ -1706,11 +2686,27 @@ void lan_run_client(const string &address)
             {
                 my_turn = p[0];
                 set_title();
+                // Our turn: back to the game.
+                if (my_turn && inv.is_open())
+                {
+                    inv.close();
+                    redraw = true;
+                }
+            }
+            else if (type == 'I')
+            {
+                inv_snapshot snap;
+                if (_unpack(p, snap))
+                {
+                    inv.set(snap);
+                    inv.draw();
+                }
             }
         }
-        if (redraw)
+        // (The inventory menu stays up over the game.)
+        if (redraw && !inv.is_open())
             v.draw();
-        if (!c.ok())
+        if (!alive || !c.ok())
             break;
 
         // Test hooks: save what we're shown once it settles; type the
@@ -1735,6 +2731,15 @@ void lan_run_client(const string &address)
         {
             net_event e = {};
             e.type = ev.type;
+            if (inv.is_open() && _is_input(ev))
+            {
+                // Our inventory menu takes the keyboard and mouse.
+                inv.handle(ev);
+                if (!inv.is_open())
+                    v.draw();
+                moved = false;
+                continue;
+            }
             switch (ev.type)
             {
             case SDL_QUIT:
@@ -1742,6 +2747,7 @@ void lan_run_client(const string &address)
                 continue;
             case SDL_WINDOWEVENT:
                 v.draw();
+                inv.draw();
                 continue;
             case SDL_KEYDOWN:
             case SDL_KEYUP:
@@ -1752,6 +2758,16 @@ void lan_run_client(const string &address)
                 e.pressed = ev.key.state == SDL_PRESSED;
                 break;
             case SDL_TEXTINPUT:
+                if (!my_turn && inv.has_snapshot()
+                    && strcmp(ev.text.text, "i") == 0)
+                {
+                    // Look at our inventory here, while the host's frames
+                    // (and news of our turn) keep coming.
+                    inv.open();
+                    inv.draw();
+                    moved = false;
+                    continue;
+                }
                 strncpy(e.text, ev.text.text, sizeof(e.text) - 1);
                 break;
             case SDL_MOUSEMOTION:
@@ -1812,7 +2828,17 @@ void lan_run_client(const string &address)
     if (quit)
         crawl_state.seen_hups++;
     else if (host_left)
-        _client_message(why.empty() ? "The host has left the game." : why);
+    {
+        if (why.empty())
+            why = "The host has left the game.";
+        _client_log(why);
+        if (!copy_note.empty())
+        {
+            _client_log(copy_note);
+            why += "\n\n" + copy_note;
+        }
+        _client_message(why);
+    }
 }
 
 namespace
@@ -1837,7 +2863,7 @@ namespace
     }
 }
 
-void lan_join_menu()
+void lan_join_menu(const string &name)
 {
     join_done = join_cancel = false;
     bool &done = join_done, &cancel = join_cancel;
@@ -1875,7 +2901,7 @@ void lan_join_menu()
     trim_string(address);
     if (address.empty())
         return;
-    lan_run_client(address);
+    lan_run_client(address, name);
 }
 
 #endif // USE_TILE_LOCAL

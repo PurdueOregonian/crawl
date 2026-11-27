@@ -1,0 +1,38 @@
+<
+-- Host side of util/lan-copy-smoke.ps1, run 1: a LAN party of three
+-- (players 2 and 3 on other computers) plays a round, then the host saves
+-- and quits (and so sends each of them a copy).
+local step = 0
+local passes = 0
+local t0
+local function d(code) return crawl.call_dlua(code) end
+local function log(s) crawl.stderr("SMOKE " .. s .. "\n") end
+local function state()
+  return d([[local s = string.format("size=%d", party.size())
+    for i = 1, party.size() do
+      local x, y = party.pos(i)
+      s = s .. string.format(" | p%d %s hp=%d at (%d,%d)", i,
+        party.species(i), party.hp(i), x, y)
+    end
+    return s]])
+end
+function ready()
+  passes = passes + 1
+  if passes > 200 then log("GAVE UP " .. state()); return end
+  if d("return party.active()") ~= 1 then return end   -- a client's turn
+  if step == 0 then
+    if d("return party.size()") ~= 3 then log("FAIL party did not start"); return end
+    -- So the save has something to tell them apart by.
+    d("party.set_hp(2, 5)")
+    d("party.set_hp(3, 7)")
+    t0 = d("return you.time()")
+    step = 1
+    crawl.sendkeys("s")
+  elseif step == 1 then
+    if d("return you.time()") < t0 + 10 then log("FAIL the round didn't complete"); return end
+    log("BEFORE " .. state())
+    step = 2
+    crawl.do_commands({"CMD_SAVE_GAME_NOW"})
+  end
+end
+>

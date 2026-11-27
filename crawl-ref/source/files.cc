@@ -49,6 +49,7 @@
 #include "dungeon.h"
 #include "end.h"
 #include "english.h"
+#include "lan.h"
 #include "party.h"
 #include "tile-env.h"
 #include "errors.h"
@@ -143,6 +144,7 @@ static bool _ghost_version_compatible(const save_version &version);
 static bool _restore_tagged_chunk(package *save, const string &name,
                                   tag_type tag, const char* complaint);
 static player_save_info _read_character_info(package *save);
+static bool _tagged_chunk_version_compatible(reader &inf, string* reason);
 
 static bool _convert_obsolete_species();
 
@@ -2585,6 +2587,35 @@ void save_level(const level_id& lid)
         savefn(w);                                        \
     } while (false)
 
+// The rest of the party (see party.h): a "party" chunk, and one per player
+// other than the one in `you`.
+static void _save_party()
+{
+    package *save = you.save;
+    if (!save)
+        return;
+    // A copy's owner (see party.h) is in the "party" chunk from now on.
+    if (save->has_chunk("pown"))
+        save->delete_chunk("pown");
+    if (!party_active())
+    {
+        if (save->has_chunk("party"))
+            save->delete_chunk("party");
+        return;
+    }
+    {
+        writer w(save, "party");
+        write_save_version(w, save_version::current());
+        party_save_state(w);
+    }
+    party_save_members([save](int idx)
+    {
+        writer w(save, make_stringf("party%d", idx));
+        write_save_version(w, save_version::current());
+        tag_write(TAG_PARTY_MEMBER, w);
+    });
+}
+
 // Stack allocated string's go in separate function, so Valgrind doesn't
 // complain.
 static void _save_game_base()
@@ -2622,6 +2653,67 @@ static void _save_game_base()
 
     _write_tagged_chunk("you", TAG_YOU);
     _write_tagged_chunk("chr", TAG_CHR);
+    _save_party();
+}
+
+static bool read_whole_file(const string &path, string &data)
+{
+    data.clear();
+    FILE *f = fopen_u(path.c_str(), "rb");
+    if (!f)
+        return false;
+    char buf[65536];
+    size_t got;
+    while ((got = fread(buf, 1, sizeof(buf), f)) > 0)
+        data.append(buf, got);
+    const bool ok = !ferror(f);
+    fclose(f);
+    return ok;
+}
+
+static bool copy_file(const string &from, const string &to)
+{
+    string data;
+    if (!read_whole_file(from, data))
+        return false;
+    FILE *f = fopen_u(to.c_str(), "wb");
+    if (!f)
+        return false;
+    const bool ok = fwrite(data.data(), 1, data.size(), f) == data.size();
+    return fclose(f) == 0 && ok;
+}
+
+// Saving and quitting a LAN game (the save at `main_path` is finished and
+// closed): make each remote player's copy of it (see party.h), with them as
+// its main player so it's theirs, and hand it to lan_host_end_game() to
+// send. It shares the levels and everything else with this save; only the
+// player chunks differ.
+static void _write_party_copies(const string &main_path)
+{
+    if (!party_active() || !lan_active())
+        return;
+    string data;
+    for (int i = 0; i < party_size(); ++i)
+    {
+        if (lan_seat_of_player(i) <= 0)
+            continue;
+        const string tmp = main_path + make_stringf(".copy%d", i);
+        string filename;
+        const bool ok = party_write_copy_as(i, [&]
+        {
+            filename = get_save_filename(you.your_name);
+            unlink_u(tmp.c_str());
+            if (!copy_file(main_path, tmp))
+                return;
+            you.save = new package(tmp.c_str(), true);
+            _save_game_base();
+            delete you.save;
+            you.save = nullptr;
+        });
+        if (ok && read_whole_file(tmp, data))
+            lan_host_add_copy(i, filename, data);
+        unlink_u(tmp.c_str());
+    }
 }
 
 // Stack allocated string's go in separate function, so Valgrind doesn't
@@ -2659,6 +2751,8 @@ void save_game(bool leave_game, const char *farewellmsg)
     // that can.
     ASSERT(you.on_current_level || Options.no_save);
 
+    if (leave_game)
+        party_focus_lead_for_save();
 
     if (leave_game && Options.dump_on_save)
     {
@@ -2699,7 +2793,10 @@ void save_game(bool leave_game, const char *farewellmsg)
 
     // Stack allocated string's go in separate function,
     // so Valgrind doesn't complain.
+    const string main_path = you.save ? you.save->get_filename() : "";
     _save_game_exit();
+    if (!main_path.empty())
+        _write_party_copies(main_path);
 
     game_ended(game_exit::save, farewellmsg ? farewellmsg
                                 : "See you soon, " + you.your_name + "!");
@@ -3215,6 +3312,183 @@ static string _type_name_processed(game_type t)
     return name.size() ? name : "regular";
 }
 
+static bool _read_party_info(package *save, party_save_info &info, bool keep)
+{
+    info = party_save_info();
+    if (!save->has_chunk("party"))
+        return false;
+    // A copy given to another player (see party.h): theirs.
+    int owner = -1;
+    if (save->has_chunk("pown"))
+    {
+        reader o(save, "pown");
+        owner = unmarshallByte(o);
+    }
+    reader r(save, "party");
+    string reason;
+    if (!_tagged_chunk_version_compatible(r, &reason))
+        return false;
+    party_read_state(r, info, keep, owner);
+    return info.size > 1;
+}
+
+// The save's party info, if `path` is a party game's save that can be read
+// now (not one being played by another copy of Crawl).
+static bool _party_info_at(const string &path, party_save_info &info)
+{
+    info = party_save_info();
+    try
+    {
+        package save(path.c_str(), false);
+        return _read_party_info(&save, info, false);
+    }
+    catch (ext_fail_exception &)   // corrupted_save too
+    {
+        return false;
+    }
+    catch (short_read_exception &)
+    {
+        return false;
+    }
+    catch (game_ended_condition &)   // locked by another game
+    {
+        return false;
+    }
+}
+
+bool party_store_copy(const string &filename, const string &game_id,
+                      int owner, const string &data, string &err)
+{
+    if (filename.empty() || !is_save_file_name(filename)
+        || filename.find_first_of("/\\") != string::npos)
+    {
+        err = "The host sent a copy with a bad file name.";
+        return false;
+    }
+    const string path = _get_savefile_directory() + filename;
+    party_save_info info;
+    if (file_exists(path)
+        && (!_party_info_at(path, info) || info.game_id != game_id))
+    {
+        err = "You already have a different game called "
+              + filename.substr(0, filename.size() - strlen(SAVE_SUFFIX))
+              + ", so no copy of this one was kept.";
+        return false;
+    }
+    const string tmp = path + ".part";
+    {
+        FILE *f = fopen_u(tmp.c_str(), "wb");
+        if (!f)
+        {
+            err = "Couldn't write a copy of the game in " + path + ".";
+            return false;
+        }
+        const bool ok = fwrite(data.data(), 1, data.size(), f) == data.size();
+        if (fclose(f) != 0 || !ok)
+        {
+            unlink_u(tmp.c_str());
+            err = "Couldn't write a copy of the game in " + path + ".";
+            return false;
+        }
+    }
+    unlink_u(path.c_str());
+    if (rename_u(tmp.c_str(), path.c_str()) != 0)
+    {
+        unlink_u(tmp.c_str());
+        err = "Couldn't write a copy of the game in " + path + ".";
+        return false;
+    }
+    // Mark it as this player's, and check it reads back.
+    try
+    {
+        package save(path.c_str(), true);
+        writer w(&save, "pown");
+        marshallByte(w, owner);
+    }
+    catch (...)   // a bad file, or someone's playing it
+    {
+        unlink_u(path.c_str());
+        err = "The copy of the game the host sent was damaged.";
+        return false;
+    }
+    if (!_party_info_at(path, info) || info.game_id != game_id
+        || info.owner != owner)
+    {
+        unlink_u(path.c_str());
+        err = "The copy of the game the host sent was damaged.";
+        return false;
+    }
+    return true;
+}
+
+bool party_delete_copy(const string &game_id)
+{
+    if (game_id.empty())
+        return false;
+    bool deleted = false;
+    const string dir = _get_savefile_directory();
+    for (const string &filename : get_dir_files_sorted(dir))
+    {
+        if (!is_save_file_name(filename))
+            continue;
+        party_save_info info;
+        if (_party_info_at(dir + filename, info) && info.game_id == game_id)
+            deleted = unlink_u((dir + filename).c_str()) == 0 || deleted;
+    }
+    return deleted;
+}
+
+void delete_save_file(const string &filename)
+{
+    if (!filename.empty() && is_save_file_name(filename)
+        && save_exists(filename))
+    {
+        unlink_u((_get_savefile_directory() + filename).c_str());
+    }
+}
+
+vector<party_copy> party_copies()
+{
+    vector<party_copy> found;
+    const string dir = _get_savefile_directory();
+    for (const string &filename : get_dir_files_sorted(dir))
+    {
+        if (!is_save_file_name(filename))
+            continue;
+        party_save_info info;
+        if (_party_info_at(dir + filename, info) && !info.game_id.empty())
+            found.push_back({info.game_id, info.owner, info.generation});
+    }
+    return found;
+}
+
+static void _restore_party_members(package *save)
+{
+    party_forget_saved();
+    party_save_info info;
+    if (!_read_party_info(save, info, true))
+        return;
+    for (int i = 0; i < info.size; ++i)
+    {
+        const string name = make_stringf("party%d", i);
+        if (i == info.main_player || !save->has_chunk(name))
+            continue;
+        party_load_member(i, [&]
+        {
+            _restore_tagged_chunk(save, name, TAG_PARTY_MEMBER,
+                                  "Party member data is invalid.");
+        });
+    }
+}
+
+bool saved_party_info(const string &filename, party_save_info &info)
+{
+    info = party_save_info();
+    if (filename.empty() || !save_exists(filename))
+        return false;
+    return _party_info_at(_get_savefile_directory() + filename, info);
+}
+
 // returns false if a new game should start instead
 static bool _restore_game(const string& filename)
 {
@@ -3299,6 +3573,9 @@ static bool _restore_game(const string& filename)
 
     you.on_current_level = false; // we aren't on the current level until
                                   // everything is fully loaded
+    // The other party members first: reading them touches some of the
+    // world state the main player's chunk then sets for good.
+    _restore_party_members(you.save);
     _restore_tagged_chunk(you.save, "you", TAG_YOU, "Save data is invalid.");
 
     _convert_obsolete_species();

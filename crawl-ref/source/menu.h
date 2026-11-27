@@ -359,6 +359,11 @@ public:
 
     void reset();
     virtual vector<MenuEntry *> show(bool reuse_selections = false);
+    // The menu's popup, for showing it without show()'s loop: the caller
+    // pushes it, feeds it events and checks overlay_done() (a key closed
+    // it). Used by LAN play to look at an inventory while the game goes on.
+    shared_ptr<ui::Popup> overlay_popup();
+    bool overlay_done() const { return m_overlay_done; }
     vector<MenuEntry *> selected_entries() const;
 
     size_t item_count(bool include_headers=true) const;
@@ -433,6 +438,7 @@ protected:
     KeymapContext m_kmc;
 
     resumable_line_reader *m_filter;
+    bool m_overlay_done = false;
 
     struct {
         shared_ptr<ui::Popup> popup;

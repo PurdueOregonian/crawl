@@ -236,6 +236,75 @@ int party_add_player(const coord_def &pos);
 // Dissolve the party; the player currently in `you` carries on alone.
 void party_reset();
 
+// ---- Saving and loading the party ----
+//
+// A save holds the player in `you` as usual (the "you" chunk, with the
+// shared pack and the world), a "party" chunk with the party's own state,
+// and a TAG_PARTY_MEMBER chunk "partyN" for each other player N (their
+// character and worn gear).
+
+class reader;
+class writer;
+
+// LAN games: each player who had their own computer gets a copy of the save
+// when the host saves and quits (see lan.h). A copy is the host's save plus a
+// "pown" chunk saying whose copy it is (its *owner*). Whoever loads a copy
+// plays their own player at that computer and hosts; everyone else who had a
+// computer joins again, and gets their own player back if they have a copy
+// too. Copies of one game share its game id; the save counter says which is
+// newest.
+
+// What a save says about its party, without loading the game.
+struct party_save_info
+{
+    int size = 0;                 // 0: not a party game
+    int main_player = 0;          // whose is the "you" chunk
+    int owner = 0;                // the player at this computer
+    string game_id;               // the same for every copy of a game
+    int generation = 0;           // how many times it has been saved
+    // Players who need to join from another computer when this copy is
+    // loaded: everyone who had their own computer, except the owner.
+    vector<bool> remote;
+    vector<string> describe;      // "Minotaur Fighter, XL 3"
+};
+
+// Write the "party" chunk's contents, and call `write_member(idx)` for each
+// other player with them in `you` (so TAG_PARTY_MEMBER writes them).
+// Nothing to do with a party of one.
+void party_save_state(writer &w);
+void party_save_members(const function<void(int)> &write_member);
+// Saving and quitting: put this computer's own player in `you` (if it's safe
+// to swap now), so the save is listed under them; the turn order is
+// unchanged.
+void party_focus_lead_for_save();
+
+// The player this computer plays when nobody else's turn shows: player 1,
+// or the owner of the copy that was loaded.
+int party_home_player();
+// Saving and quitting a LAN game: call `write()` with player `idx` in `you`
+// and as the home player, so what it saves is their copy (listed under
+// them, and loaded with them as the main player); the save counter stays
+// as it is. False (nothing done) if that can't be done now.
+bool party_write_copy_as(int idx, const function<void()> &write);
+// This game's id ("" before it was first saved) and save counter.
+string party_game_id();
+int party_save_generation();
+
+// Read a "party" chunk. Fills `info`; with `keep`, also remembers the
+// party's state for party_resume(). `owner`: whose copy this is (from its
+// "pown" chunk), or -1 for the host's own save.
+void party_read_state(reader &r, party_save_info &info, bool keep,
+                      int owner = -1);
+// Loading a save: call `read_member()` with a fresh player in `you` to read
+// party member `idx`, and keep them for party_resume(). Before the "you"
+// chunk is read, so that the main player's world state wins.
+void party_load_member(int idx, const function<void()> &read_member);
+// Forget any party read from a save (a new game, or a save without one).
+void party_forget_saved();
+// A party was just loaded with the game: rebuild it around the player in
+// `you`. False if the save had no party.
+bool party_resume();
+
 // Make player `idx` the active player (and swap them into `you`).
 void party_switch_to(int idx);
 

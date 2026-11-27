@@ -8,8 +8,10 @@
 #include "party.h"
 
 #include <climits>
+#include <ctime>
 #include <map>
 #include <memory>
+#include <random>
 #include <vector>
 
 #include "abyss.h"
@@ -54,6 +56,7 @@
 #include "options.h"
 #include "state.h"
 #include "stringutil.h"
+#include "tags.h"
 #include "terrain.h"
 #include "transform.h"
 #include "traps.h"
@@ -131,6 +134,16 @@ namespace
     // a multi-turn action); only the player about to be asked for a command
     // is announced, so those turns don't flood messages and redraws.
     int announced = -1;
+    // Saving (see party.h): this computer's own player, the game's id and
+    // how many times it has been saved.
+    int home_player = 0;
+    string game_id;
+    int save_generation = 0;
+    // Writing another player's copy of a save: it's the same save, so it
+    // doesn't count. The host's own player (whose computer this is) then
+    // still had their own computer.
+    bool writing_copy = false;
+    int copy_host_player = -1;
 
     // Shared pack. Everything nobody is wearing or wielding belongs to the
     // whole party and travels with control: it's in the inventory of the
@@ -463,6 +476,9 @@ void party_reset()
     follow_blocked_turns = 0;
     active = focused = 0;
     announced = -1;
+    home_player = 0;
+    game_id.clear();
+    save_generation = 0;
 }
 
 void party_switch_to(int idx)
@@ -1128,6 +1144,14 @@ namespace
         newgame_def ng;
     };
     std::map<int, prechoice> prechosen;
+
+    // A new player's character name: what they called themselves at their
+    // own computer (LAN), else "Player N".
+    string _character_name(int idx)
+    {
+        const string own = lan_player_name(idx);
+        return own.empty() ? party_member_name(idx) : own;
+    }
 }
 
 int party_planned_size()
@@ -1175,7 +1199,7 @@ void party_prechoose_characters(int size)
             pc.chosen = false;
             continue;
         }
-        pc.ng.name = party_member_name(idx);
+        pc.ng.name = _character_name(idx);
         pc.ng.type = (crawl_state.type == GAME_TYPE_TUTORIAL
                       || crawl_state.type == GAME_TYPE_HINTS)
                      ? GAME_TYPE_NORMAL : crawl_state.type;
@@ -1211,7 +1235,7 @@ void party_start(int size, bool choose)
         else if (choose)
         {
             lan_seat_scope seat(lan_seat_of_player(idx));
-            chosen = choose_party_member(ng, name);
+            chosen = choose_party_member(ng, _character_name(idx));
         }
         if (chosen)
             party_add_character(spot, ng);
@@ -1220,6 +1244,10 @@ void party_start(int size, bool choose)
             if (choose || pre != prechosen.end())
                 mprf("%s joins as a copy of you.", name.c_str());
             party_add_player(spot);
+            // A copy, but with their own name if they gave one.
+            const string own = lan_player_name(idx);
+            if (!own.empty() && idx != focused)
+                slots[idx]->your_name = own;
         }
     }
     prechosen.clear();
@@ -1983,3 +2011,310 @@ const struct luaL_Reg party_dlib[] =
 { "danger", party_lua_danger },
 { nullptr, nullptr }
 };
+
+// ---------------------------------------------------------------- saving
+
+namespace
+{
+    // What party_read_state() / party_load_member() read from a save, until
+    // party_resume() rebuilds the party from it.
+    struct saved_party
+    {
+        bool valid = false;
+        int size = 0;
+        int focused = 0;            // whose "you" chunk the main one is
+        int active = 0;
+        int owner = 0;
+        string game_id;
+        int generation = 0;
+        vector<int> spent;
+        vector<int> revive_progress;
+        vector<vector<int>> dolls;  // base doll parts (Tiles)
+        vector<unique_ptr<player>> members;
+    };
+    saved_party loaded;
+
+    // Bump if the "party" chunk changes. 2: game id, save counter, owner,
+    // and "had their own computer" in place of "was remote".
+    const int PARTY_SAVE_FORMAT = 2;
+
+    string _new_game_id()
+    {
+        // Not the game's RNG: that's seeded, and ids must differ between
+        // games with the same seed.
+        random_device rd;
+        const uint64_t a = ((uint64_t)rd() << 32) ^ rd();
+        const uint64_t b = (uint64_t)time(nullptr);
+        return make_stringf("%016llx%08llx", (unsigned long long)a,
+                            (unsigned long long)(b & 0xffffffff));
+    }
+
+    string _describe_member(const player &p)
+    {
+        return make_stringf("%s %s, XL %d",
+                            species::name(p.species).c_str(),
+                            get_job_name(p.char_class), p.experience_level);
+    }
+}
+
+void party_save_state(writer &w)
+{
+    marshallInt(w, PARTY_SAVE_FORMAT);
+    const int n = party_active() ? slots.size() : 0;
+    marshallByte(w, n);
+    if (!n)
+        return;
+    marshallByte(w, focused);
+    marshallByte(w, active);
+    if (game_id.empty())
+        game_id = _new_game_id();
+    if (!writing_copy)
+        ++save_generation;
+    marshallString(w, game_id);
+    marshallInt(w, save_generation);
+    marshallByte(w, home_player);
+    for (int i = 0; i < n; ++i)
+    {
+        marshallInt(w, spent[i]);
+        marshallInt(w, revive_progress[i]);
+        // Had their own computer: this one's player, and anyone playing
+        // from another computer right now.
+        marshallBoolean(w, i == home_player || i == copy_host_player
+                           || lan_seat_of_player(i) > 0);
+        marshallString(w, _describe_member(party_member(i)));
+#ifdef USE_TILE
+        const dolls_data &d = i == focused ? player_doll : base_dolls[i];
+        marshallShort(w, TILEP_PART_MAX);
+        for (int p = 0; p < TILEP_PART_MAX; ++p)
+            marshallInt(w, d.parts[p]);
+#else
+        marshallShort(w, 0);
+#endif
+    }
+}
+
+void party_save_members(const function<void(int)> &write_member)
+{
+    if (!party_active())
+        return;
+    for (int i = 0; i < (int)slots.size(); ++i)
+    {
+        if (i == focused)
+            continue;
+        // Just a plain swap: nothing else (pack, LOS, view) needs to follow
+        // for the length of a write.
+        package *save = you.save;
+        you.save = nullptr;
+        swap(you, *slots[i]);
+        write_member(i);
+        swap(you, *slots[i]);
+        you.save = save;
+    }
+}
+
+void party_focus_lead_for_save()
+{
+    if (!party_active() || focused == home_player || in_monster_phase
+        || crawl_state.seen_hups)
+    {
+        return;
+    }
+    swap_in(home_player);
+}
+
+int party_home_player()
+{
+    return home_player;
+}
+
+bool party_write_copy_as(int idx, const function<void()> &write)
+{
+    if (!party_active() || idx < 0 || idx >= (int)slots.size()
+        || in_monster_phase || crawl_state.seen_hups)
+    {
+        return false;
+    }
+    const int prev_focus = focused;
+    const int prev_home = home_player;
+    unwind_bool copying(writing_copy, true);
+    unwind_var<int> host(copy_host_player, prev_home);
+    home_player = idx;
+    swap_in(idx);
+    write();
+    swap_in(prev_focus);
+    home_player = prev_home;
+    return true;
+}
+
+string party_game_id()
+{
+    return game_id;
+}
+
+int party_save_generation()
+{
+    return save_generation;
+}
+
+void party_read_state(reader &r, party_save_info &info, bool keep, int owner)
+{
+    info = party_save_info();
+    if (keep)
+        party_forget_saved();
+    const int format = unmarshallInt(r);
+    if (format > PARTY_SAVE_FORMAT)
+        return;     // from a newer fork: load as a lone player
+    const int n = unmarshallByte(r);
+    if (n < 2 || n > PARTY_MAX_SIZE)
+        return;
+    saved_party s;
+    s.size = n;
+    s.focused = unmarshallByte(r);
+    s.active = unmarshallByte(r);
+    if (s.focused < 0 || s.focused >= n || s.active < 0 || s.active >= n)
+        return;
+    if (format >= 2)
+    {
+        s.game_id = unmarshallString(r);
+        s.generation = unmarshallInt(r);
+        s.owner = unmarshallByte(r);
+    }
+    if (owner >= 0)
+        s.owner = owner;
+    if (s.owner < 0 || s.owner >= n)
+        return;
+    info.size = n;
+    info.main_player = s.focused;
+    info.owner = s.owner;
+    info.game_id = s.game_id;
+    info.generation = s.generation;
+    for (int i = 0; i < n; ++i)
+    {
+        s.spent.push_back(unmarshallInt(r));
+        s.revive_progress.push_back(unmarshallInt(r));
+        // Format 1 said "was remote"; player 1 was always the host's.
+        const bool own_computer = unmarshallBoolean(r)
+                                  || format < 2 && i == 0;
+        info.remote.push_back(own_computer && i != s.owner);
+        info.describe.push_back(unmarshallString(r));
+        const int parts = unmarshallShort(r);
+        vector<int> doll;
+        for (int p = 0; p < parts; ++p)
+            doll.push_back(unmarshallInt(r));
+        s.dolls.push_back(doll);
+    }
+    if (keep)
+    {
+        s.valid = true;
+        s.members.resize(n);
+        loaded = std::move(s);
+    }
+}
+
+void party_load_member(int idx, const function<void()> &read_member)
+{
+    ASSERT(loaded.valid);
+    ASSERT(idx >= 0 && idx < loaded.size && idx != loaded.focused);
+    auto p = make_unique<player>();
+    p->save = nullptr;
+    package *save = you.save;
+    you.save = nullptr;
+    swap(you, *p);
+    read_member();
+    swap(you, *p);
+    you.save = save;
+    p->save = nullptr;
+    loaded.members[idx] = std::move(p);
+}
+
+void party_forget_saved()
+{
+    loaded = saved_party();
+}
+
+bool party_resume()
+{
+    if (!loaded.valid)
+        return false;
+    for (int i = 0; i < loaded.size; ++i)
+        if (i != loaded.focused && !loaded.members[i])
+        {
+            // A member's chunk was missing: no party after all.
+            party_forget_saved();
+            return false;
+        }
+    party_reset();
+    const int n = loaded.size;
+    for (int i = 0; i < n; ++i)
+    {
+        if (i == loaded.focused)
+        {
+            // Placeholder for the player in `you`, as in party_add_player().
+            slots.push_back(make_unique<player>(you));
+            slots.back()->save = nullptr;
+        }
+        else
+            slots.push_back(std::move(loaded.members[i]));
+        spent.push_back(loaded.spent[i]);
+        stop_auto.emplace_back();
+        notice.emplace_back();
+        revive_progress.push_back(loaded.revive_progress[i]);
+#ifdef USE_TILE
+        dolls_data d = player_doll;
+        if ((int)loaded.dolls[i].size() == TILEP_PART_MAX)
+            for (int p = 0; p < TILEP_PART_MAX; ++p)
+                d.parts[p] = loaded.dolls[i][p];
+        base_dolls.push_back(d);
+        dolls.push_back(d);
+#endif
+    }
+    active = focused = loaded.focused;
+#ifdef USE_TILE
+    player_doll = base_dolls[focused];
+#endif
+    const int turn = loaded.active;
+    home_player = loaded.owner;
+    game_id = loaded.game_id;
+    save_generation = loaded.generation;
+    party_forget_saved();
+
+    // Everyone is on this level (the party travels together); make sure
+    // nobody stands somewhere they can't, or on someone else.
+    for (int i = 0; i < n; ++i)
+    {
+        if (i == focused)
+            continue;
+        player &p = *slots[i];
+        p.flash_where = nullptr;
+        p.delay_queue.clear();
+        bool shared = false;
+        for (int j = 0; j < i; ++j)
+            if (j != focused && slots[j]->pos() == p.pos())
+                shared = true;
+        if (!_here(p) || !_member_square_ok(p) || shared)
+        {
+            p.where_are_you = you.where_are_you;
+            p.depth = you.depth;
+            _place_member_near(i, you.pos());
+        }
+    }
+    // Each player in turn: work out what loading leaves to be calculated
+    // (max HP/MP, vision), as the game did for the main one; swapping them
+    // in and out also records how they look with their gear on, for drawing
+    // them when it isn't their turn.
+    for (int i = 0; i < n; ++i)
+        if (i != focused)
+        {
+            const int prev = focused;
+            swap_in(i);
+            calc_hp();
+            calc_mp();
+            update_vision_range();
+            you.redraw_hit_points = you.redraw_magic_points = true;
+            swap_in(prev);
+        }
+    if (turn != focused)
+        party_switch_to(turn);
+    los_changed();
+    return true;
+}

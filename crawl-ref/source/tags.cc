@@ -1319,6 +1319,16 @@ void tag_write(tag_type tagID, writer &outf)
         CANARY;
         _tag_construct_companions(th);
         break;
+    case TAG_PARTY_MEMBER:
+        // Just the character and what they carry: the dungeon-wide parts of
+        // TAG_YOU come from the main player. The character basics (species,
+        // name, ...) are in the "chr" chunk for the main player.
+        _tag_construct_char(th);
+        CANARY;
+        _tag_construct_you(th);
+        CANARY;
+        _tag_construct_you_items(th);
+        break;
     case TAG_LEVEL:
         _tag_construct_level(th);
         CANARY;
@@ -1553,6 +1563,29 @@ void tag_read(reader &inf, tag_type tag_id)
         }
 #endif
         break;
+    case TAG_PARTY_MEMBER:
+    {
+        uint8_t format = 0;
+        th.read(&format, 1);
+        if (format > TAG_CHR_FORMAT)
+            fail("Party member data from the future");
+        const player_save_info info = tag_read_char_info(th, format,
+                                          TAG_MAJOR_VERSION,
+                                          th.getMinorVersion());
+        // (Without its side effects on the game's type: that's the main
+        // player's business.)
+        const game_type type = crawl_state.type;
+        const string map = crawl_state.map;
+        you.init_from_save_info(info);
+        crawl_state.type = type;
+        crawl_state.map = map;
+        EAT_CANARY;
+        _tag_read_you(th);
+        EAT_CANARY;
+        _tag_read_you_items(th);
+        reset_training();
+        break;
+    }
     case TAG_LEVEL:
         _tag_read_level(th);
         EAT_CANARY;

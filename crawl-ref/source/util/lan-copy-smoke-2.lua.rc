@@ -1,0 +1,36 @@
+<
+-- Host side of util/lan-copy-smoke.ps1, run 2: a player who was on another
+-- computer loads their copy of the game (smoke_me: their player number) and
+-- hosts it. Once the others have joined again, play a round: it only
+-- completes if each of them plays their own player from their computer.
+local step = 0
+local passes = 0
+local t0
+local function d(code) return crawl.call_dlua(code) end
+local function log(s) crawl.stderr("SMOKE " .. s .. "\n") end
+local function state()
+  return d([[local s = string.format("size=%d", party.size())
+    for i = 1, party.size() do
+      local x, y = party.pos(i)
+      s = s .. string.format(" | p%d %s hp=%d at (%d,%d)", i,
+        party.species(i), party.hp(i), x, y)
+    end
+    return s]])
+end
+function ready()
+  passes = passes + 1
+  if passes > 200 then log("GAVE UP " .. state()); return end
+  if d("return party.active()") ~= smoke_me then return end  -- someone else's
+  if step == 0 then
+    log("AFTER " .. state())
+    t0 = d("return you.time()")
+    step = 1
+    crawl.sendkeys("s")
+  elseif step == 1 then
+    if d("return you.time()") < t0 + 10 then log("FAIL the round didn't complete"); return end
+    log("PASS a round with everyone back " .. state())
+    step = 2
+    log("DONE")
+  end
+end
+>

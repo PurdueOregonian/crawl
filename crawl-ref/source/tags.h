@@ -38,6 +38,7 @@ enum tag_type   // used during save/load process to identify data blocks
     TAG_YOU,                            // the main part of the save
     TAG_LEVEL,                          // a single dungeon level
     TAG_GHOST,                          // ghost
+    TAG_PARTY_MEMBER,                   // a party member other than `you`
     NUM_TAGS,
 
     // Returned when a known tag was deliberately not read. This value is

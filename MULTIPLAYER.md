@@ -120,16 +120,47 @@ it for private networks. All computers need the same version of Crawl.
   only their keyboard and mouse do anything. Everyone else's window shows
   their own player's view, refreshed as the game goes on. Under the stats,
   a green **YOUR TURN** or a grey "Waiting: Player N's turn" says which.
+- While you wait, `i` opens your inventory menu as it stood after the last
+  move: pick an item to read its description, but nothing can be used,
+  worn or dropped from it. `i` or Escape closes it, and it closes by itself
+  when your turn comes. The game carries on meanwhile.
 - Only the host's computer runs the game (and saves it). If a player's
   computer disconnects, the host plays them from then on.
 - The joining copy only shows pictures of the host's screen, scaled to fit
   its window. It doesn't need the save files or the host's options. When the
-  host leaves, it goes back to the start menu.
+  game ends on the host (saved, over, or the host quits), the other players
+  are told why and go back to their start menu (with `-lan-join` too).
+- **Saving:** the host saves the whole party as usual (it's listed under
+  the host's own player). When the host saves and quits, every player
+  who's connected gets a copy of the save, kept in their own save folder.
+  It's listed under the game's name, like any other save.
+- **Carrying on:** anyone with a copy can load it from the start menu. Their
+  computer hosts the game by itself, with them playing their own player, and
+  waits for everyone else who had their own computer. Each of those chooses
+  **Join LAN Game** and gets their own player back, whatever order they join
+  in. Someone without a copy gets the first player nobody has taken. The
+  game carries on once everyone is back. On the waiting screen:
+  - **Enter** carries on now; missing players are played at the host.
+  - **Esc** stops hosting.
+  - **D, D** deletes the game for good, along with the copies of anyone who
+    has joined.
+
+  A player whose copy is newer than the one being loaded is marked *has a
+  newer save of this game!*. That happens if the game carried on without
+  them from another copy, then that player saved, and now an older copy is
+  being loaded.
+- **When the game ends for good** (death, win, quit), everyone connected
+  has their copy deleted. Anyone who wasn't there keeps theirs.
 
 ## Known limitations
 
-- **No saving yet.** Only the active player is saved. On reload, the
-  others rejoin as fresh copies of that player.
+- **Saves from before party saving** reload with the others as fresh
+  copies of the main player.
+- **Copies of a LAN game can fork:** two players who never meet up again
+  could each carry on from their own copy.
+- **Players who shared the host's computer** (added with `+` in the lobby)
+  don't get copies. When another player hosts, they're played at the new
+  host's computer.
 - **Spells and area effects** (fireballs, clouds, beams) only affect the
   player whose turn it is, not other party members in range.
 - **Some per-turn god effects** only apply to the player who is acting.
@@ -155,6 +186,9 @@ build):
 pwsh crawl-ref/source/util/run-tests.ps1 party_baseline,party_two_players,party_hotseat
 pwsh crawl-ref/source/util/party-smoke.ps1     # real game: stairs, travel, explore...
 pwsh crawl-ref/source/util/lan-smoke.ps1       # two Tiles copies over the network
+pwsh crawl-ref/source/util/party-save-smoke.ps1 # save a party, load it, compare
+pwsh crawl-ref/source/util/lan-resume-smoke.ps1 # LAN save, reload, client rejoins
+pwsh crawl-ref/source/util/lan-copy-smoke.ps1   # 3 computers: copies, host from one, delete
 ```
 
 Both take `-Exe <path>` to run a console build from somewhere else (all

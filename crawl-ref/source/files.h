@@ -108,6 +108,30 @@ void write_save_version(writer &file, save_version version);
 save_version get_save_version(reader &file);
 
 bool save_exists(const string& filename);
+// What the save `filename` says about its party (see party.h), without
+// loading it. False if it isn't a party game (or can't be read).
+struct party_save_info;
+bool saved_party_info(const string &filename, party_save_info &info);
+
+// LAN players' copies of a party game's save (see party.h), in this
+// computer's save directory.
+struct party_copy
+{
+    string game_id;
+    int owner;          // whose copy: the player who plays at this computer
+    int generation;     // the game's save counter when it was copied
+};
+vector<party_copy> party_copies();
+// Keep the save the host sent (`data`, its file `filename`) as player
+// `owner`'s copy, replacing an older copy of the same game. False (with the
+// reason in `err`) if it can't, e.g. there's a different game by that name.
+bool party_store_copy(const string &filename, const string &game_id,
+                      int owner, const string &data, string &err);
+// Delete this computer's copies of the game (it ended, or the host deleted
+// it). True if there were any.
+bool party_delete_copy(const string &game_id);
+// Delete the save `filename` (in the save directory), if it's there.
+void delete_save_file(const string &filename);
 bool restore_game(const string& filename);
 
 bool is_existing_level(const level_id &level);
