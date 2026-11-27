@@ -1429,6 +1429,16 @@ void TilesFramework::update_tabs()
         it->second->update();
 }
 
+vector<inventory_spot> TilesFramework::inventory_spots() const
+{
+    if (!m_region_inv || !m_region_tab || m_active_layer != LAYER_NORMAL
+        || m_region_tab->active_tab() != TAB_ITEM)
+    {
+        return {};
+    }
+    return m_region_inv->spots();
+}
+
 void TilesFramework::toggle_inventory_display()
 {
     int idx = m_region_tab->active_tab();

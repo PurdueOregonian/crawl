@@ -37,6 +37,30 @@ InventoryRegion::InventoryRegion(const TileRegionInit &init) : GridRegion(init)
 {
 }
 
+vector<inventory_spot> InventoryRegion::spots()
+{
+    vector<inventory_spot> found;
+    if (dx <= 0 || dy <= 0)
+        return found;
+    for (int cy = 0; cy < my; ++cy)
+        for (int cx = 0; cx < mx; ++cx)
+        {
+            // As cursor_index() has it.
+            const int i = cx + cy * mx + m_grid_page * mx * my
+                          - m_grid_page * 2;
+            if (i < 0 || i >= (int)m_items.size() || m_items[i].empty()
+                || (m_items[i].flag & TILEI_FLAG_FLOOR)
+                || _is_prev_button(i) || _is_next_button(i)
+                || m_items[i].idx < 0 || m_items[i].idx >= ENDOFPACK)
+            {
+                continue;
+            }
+            found.push_back({sx + ox + cx * dx, sy + oy + cy * dy, dx, dy,
+                             m_items[i].idx});
+        }
+    return found;
+}
+
 static tileidx_t _get_floor_tile_cycling(unsigned int i)
 {
     tileidx_t base_tile = tile_env.default_flavour.floor;

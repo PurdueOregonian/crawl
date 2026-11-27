@@ -164,6 +164,15 @@ public:
 
     coord_def cursor_pos;
 
+    bool changed_layout_since_click() const
+    {
+        return m_changed_layout_since_click;
+    }
+    void set_changed_layout_since_click(bool changed)
+    {
+        m_changed_layout_since_click = changed;
+    }
+
 protected:
     int m_w, m_h;
     Region m_region;
@@ -175,6 +184,11 @@ protected:
 } ui_root;
 
 static ScissorStack scissor_stack;
+
+#ifdef USE_TILE_LOCAL
+// See push_layout_steady().
+static bool hover_frozen = false;
+#endif
 
 struct Widget::slots Widget::slots = {};
 
@@ -2728,6 +2742,8 @@ static function<bool(const wm_event&)> event_filter;
 #ifdef USE_TILE_LOCAL
 void UIRoot::update_hover_path()
 {
+    if (hover_frozen)
+        return;
     int mx = 0;
     int my = 0;
     if (wm)
@@ -2796,6 +2812,8 @@ void UIRoot::send_mouse_enter_leave_events(
 
 void UIRoot::update_hover_path_for_widget(Widget *widget)
 {
+    if (hover_frozen)
+        return;
     // truncate the hover path if the widget was previously hovered,
     // but don't deliver any mouseleave events.
     if (!widget->_get_parent())
@@ -3146,6 +3164,33 @@ static void remap_key(wm_event &event)
     event.key.keysym.sym = macro_buf_get();
     ASSERT(event.key.keysym.sym != -1);
 }
+
+#ifdef USE_TILE_LOCAL
+void push_layout_steady(shared_ptr<Widget> root, KeymapContext km)
+{
+    const bool changed = ui_root.changed_layout_since_click();
+    {
+        unwind_bool steady(hover_frozen, true);
+        push_layout(std::move(root), km);
+    }
+    ui_root.set_changed_layout_since_click(changed);
+}
+
+void pop_layout_steady()
+{
+    const bool changed = ui_root.changed_layout_since_click();
+    {
+        unwind_bool steady(hover_frozen, true);
+        pop_layout();
+    }
+    ui_root.set_changed_layout_since_click(changed);
+}
+
+void update_hover()
+{
+    ui_root.update_hover_path();
+}
+#endif
 
 void force_render()
 {

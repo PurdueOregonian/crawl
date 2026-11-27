@@ -506,10 +506,19 @@ namespace
         string desc;            // its text, with colour tags
     };
 
+    // Where the side panel shows an item (in the window's pixels, as mouse
+    // events have them), so a click there can describe it.
+    struct inv_spot
+    {
+        int x = 0, y = 0, w = 0, h = 0;
+        int item = -1;          // index in inv_snapshot::items
+    };
+
     struct inv_snapshot
     {
         string title;
         vector<inv_item> items;
+        vector<inv_spot> spots;
     };
 
     void _put_str(vector<uint8_t> &b, const string &s)
@@ -534,6 +543,15 @@ namespace
             }
             _put_str(b, it.title);
             _put_str(b, it.desc);
+        }
+        _put32(b, s.spots.size());
+        for (const inv_spot &sp : s.spots)
+        {
+            _put32(b, sp.x);
+            _put32(b, sp.y);
+            _put32(b, sp.w);
+            _put32(b, sp.h);
+            _put32(b, sp.item);
         }
         return b;
     }
@@ -560,7 +578,43 @@ namespace
             it.desc = u.str();
             s.items.push_back(std::move(it));
         }
+        s.spots.clear();
+        const uint32_t ns = u.u32();
+        for (uint32_t i = 0; u.ok && i < ns && i < 1000; ++i)
+        {
+            inv_spot sp;
+            sp.x = (int)u.u32();
+            sp.y = (int)u.u32();
+            sp.w = (int)u.u32();
+            sp.h = (int)u.u32();
+            sp.item = (int)u.u32();
+            if (sp.item >= 0 && sp.item < (int)s.items.size())
+                s.spots.push_back(sp);
+        }
         return u.ok;
+    }
+
+    // Where the side panel shows the swapped-in player's items (as of the
+    // last redraw), given which snapshot item each inventory slot is.
+    vector<inv_spot> _inventory_spots(const map<int, int> &item_of_slot)
+    {
+        vector<inv_spot> spots;
+        // The panel's pixels are mouse pixels / the game scale.
+        const int scale = max(1, display_density.get_game_scale());
+        for (const inventory_spot &is : tiles.inventory_spots())
+        {
+            const auto it = item_of_slot.find(is.slot);
+            if (it == item_of_slot.end())
+                continue;
+            inv_spot sp;
+            sp.x = is.x * scale;
+            sp.y = is.y * scale;
+            sp.w = is.w * scale;
+            sp.h = is.h * scale;
+            sp.item = it->second;
+            spots.push_back(sp);
+        }
+        return spots;
     }
 
     // The swapped-in player's item names, in inventory order: when these
@@ -572,6 +626,10 @@ namespace
             for (const auto &item : you.inv)
                 if (item.defined() && item.base_type == inv_order[obj])
                     key += item.name(DESC_INVENTORY_EQUIP) + "|";
+        // And where the side panel shows them.
+        for (const inventory_spot &is : tiles.inventory_spots())
+            key += make_stringf("%d,%d,%d,%d,%d|", is.x, is.y, is.w, is.h,
+                                is.slot);
         return key;
     }
 
@@ -581,6 +639,7 @@ namespace
         inv_snapshot s;
         s.title = make_stringf("%s's inventory: %s, %d gold", who.c_str(),
                                slot_description().c_str(), you.gold);
+        map<int, int> item_of_slot;
         for (int obj = 0; obj < NUM_OBJECT_CLASSES; obj++)
         {
             const int cls = inv_order[obj];
@@ -597,6 +656,7 @@ namespace
                     s.items.push_back(h);
                     header = true;
                 }
+                item_of_slot[&item - &you.inv[0]] = (int)s.items.size();
                 inv_item it;
                 it.name = item.name(DESC_INVENTORY_EQUIP);
                 it.colour = menu_colour(it.name, item_prefix(item, false),
@@ -623,6 +683,7 @@ namespace
                 s.items.push_back(std::move(it));
             }
         }
+        s.spots = _inventory_spots(item_of_slot);
         return s;
     }
 
@@ -667,7 +728,7 @@ namespace
                          || described >= (int)snap.items.size()
                          || snap.items[described].title != desc_title))
             {
-                desc = nullptr;     // that item has gone (or changed)
+                _drop_desc();       // that item has gone (or changed)
             }
         }
 
@@ -676,16 +737,50 @@ namespace
             if (!have)
                 return;
             menu = make_unique<offturn_menu>();
+            // Choosing an item (its letter, Enter, or a click) or examining
+            // it (a right click) shows its description.
             menu->on_single_selection = [this](const MenuEntry &me) {
-                _describe(*static_cast<const int *>(me.data));
+                if (me.data)
+                    _describe(*static_cast<const int *>(me.data));
                 return true;
             };
+            menu->on_examine = menu->on_single_selection;
             _fill();
             popup = menu->overlay_popup();
         }
 
+        // The item the side panel shows at (x, y) (window pixels), or -1.
+        int item_at(int x, int y) const
+        {
+            if (!have)
+                return -1;
+            for (const inv_spot &sp : snap.spots)
+                if (x >= sp.x && x < sp.x + sp.w && y >= sp.y
+                    && y < sp.y + sp.h)
+                {
+                    return sp.item;
+                }
+            return -1;
+        }
+
+        // Show an item's description (as a click on it in the side panel
+        // does): closing it closes everything.
+        void open_item(int i)
+        {
+            if (!have || i < 0 || i >= (int)snap.items.size())
+                return;
+            if (!menu)
+                open();
+            _describe(i);
+            desc_only = desc != nullptr;
+            draw();
+        }
+
         void close()
         {
+            // (See ui::push_layout_steady().)
+            ui::update_hover();
+            desc_only = false;
             desc = nullptr;
             popup = nullptr;
             menu = nullptr;
@@ -711,8 +806,9 @@ namespace
             SDL_PushEvent(&copy);
             _with_layouts([] { ui::pump_events(0); });
             if (desc_done)
-                desc = nullptr;
-            if (menu->overlay_done() || crawl_state.seen_hups)
+                _drop_desc();
+            if ((desc_done && desc_only) || menu->overlay_done()
+                || crawl_state.seen_hups)
                 close();
             else
                 draw();
@@ -725,6 +821,7 @@ namespace
         shared_ptr<ui::Popup> popup;
         shared_ptr<ui::Popup> desc;
         bool desc_done = false;
+        bool desc_only = false;     // see open_item()
         int described = -1;
         string desc_title;
         // Entry data: each item's index in snap.items.
@@ -761,11 +858,21 @@ namespace
             }
         }
 
+        void _drop_desc()
+        {
+            if (!desc)
+                return;
+            ui::update_hover();     // see ui::push_layout_steady()
+            desc = nullptr;
+        }
+
         void _describe(int i)
         {
-            if (i < 0 || i >= (int)snap.items.size())
+            // (One at a time: it covers the menu anyway.)
+            if (desc || i < 0 || i >= (int)snap.items.size())
                 return;
             const inv_item &it = snap.items[i];
+            _test_log("LAN: describing " + it.title);
             described = i;
             desc_title = it.title;
             desc_done = false;
@@ -816,14 +923,17 @@ namespace
         {
             unwind_bool regions(ui::should_render_current_regions, false);
             ui::cutoff_point cutoff;
-            ui::push_layout(popup, KMC_MENU);
+            // These are pushed again around every event: without "steady",
+            // the mouse would leave them and come back each time, and no
+            // click on them would ever count.
             const bool had_desc = desc != nullptr;
+            ui::push_layout_steady(popup, KMC_MENU);
             if (had_desc)
-                ui::push_layout(desc);
+                ui::push_layout_steady(desc);
             fn();
             if (had_desc)
-                ui::pop_layout();
-            ui::pop_layout();
+                ui::pop_layout_steady();
+            ui::pop_layout_steady();
         }
     };
 
@@ -1521,24 +1631,38 @@ lan_resume lan_host_resume_lobby(const party_save_info &info)
     }
 
     bool cancel = false, start_now = false, delete_game = false;
-    // 'D' once asks to make sure; 'D' again deletes.
-    bool delete_asked = false;
+    // 'D' once asks to make sure; 'D' again deletes. Likewise Enter, to
+    // carry on without the missing players (for good: the game is saved
+    // with them playing here from then on).
+    bool delete_asked = false, start_asked = false;
+    // Keys pressed just before this appears (the Enter that loaded the
+    // game, or its repeats) aren't meant for it.
+    const unsigned int opened = SDL_GetTicks();
     auto text = make_shared<ui::Text>();
     text->set_margin_for_sdl(10);
     auto popup = make_shared<ui::Popup>(text);
     popup->on_keydown_event([&](const ui::KeyEvent& ev) {
         const int key = ev.key();
+        if (SDL_GetTicks() - opened < 750)
+            return true;
         if (key == 'D' || key == 'd')
         {
             if (delete_asked)
                 delete_game = true;
             delete_asked = true;
+            start_asked = false;
             return true;
         }
         delete_asked = false;
         if (key == CK_ENTER || key == '\r' || key == '\n')
-            start_now = true;
-        else if (ui::key_exits_popup(key, false))
+        {
+            if (start_asked)
+                start_now = true;
+            start_asked = true;
+            return true;
+        }
+        start_asked = false;
+        if (ui::key_exits_popup(key, false))
             cancel = true;
         return true;
     });
@@ -1657,8 +1781,13 @@ lan_resume lan_host_resume_lobby(const party_save_info &info)
             "players who were on other computers to join again.\n\n"
             + how + "\n\n" + list + "\n"
               "The game carries on once everyone is back.\n\n"
-              "<lightgrey>[Enter] carry on now (missing players play here)\n"
-              "[Esc] stop hosting\n"
+            + (start_asked
+               ? "<lightred>[Enter] again: carry on without the missing "
+                 "players. They play here from now on, even after saving."
+                 "</lightred>\n<lightgrey>"
+               : "<lightgrey>[Enter] carry on now (missing players play "
+                 "here)\n")
+            + "[Esc] stop hosting\n"
             + (delete_asked
                ? "</lightgrey><lightred>[D] again: delete this game for "
                  "good, here and the copies of everyone who has joined"
@@ -1947,6 +2076,16 @@ namespace
                 host_inv.open();
                 host_inv.draw();
             });
+        }
+        // A click on an item in the side panel: its description.
+        else if (event.type == SDL_MOUSEBUTTONDOWN
+                 && (event.button.button == SDL_BUTTON_LEFT
+                     || event.button.button == SDL_BUTTON_RIGHT))
+        {
+            const int item = host_inv.item_at(event.button.x,
+                                              event.button.y);
+            if (item >= 0)
+                _host_menu([item] { host_inv.open_item(item); });
         }
     }
 }
@@ -2793,6 +2932,19 @@ void lan_run_client(const string &address, const string &name)
                 e.buttons = ev.button.button;
                 e.clicks = ev.button.clicks;
                 e.pressed = ev.button.state == SDL_PRESSED;
+                // Not our turn: a click on an item in the side panel shows
+                // its description (it can't be used now).
+                if (!my_turn && e.pressed
+                    && (ev.button.button == SDL_BUTTON_LEFT
+                        || ev.button.button == SDL_BUTTON_RIGHT))
+                {
+                    const int item = inv.item_at(e.x, e.y);
+                    if (item >= 0)
+                    {
+                        inv.open_item(item);
+                        continue;
+                    }
+                }
                 break;
             case SDL_MOUSEWHEEL:
                 e.wheel_x = ev.wheel.x;

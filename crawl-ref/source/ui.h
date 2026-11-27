@@ -1274,6 +1274,19 @@ void run_layout(shared_ptr<Widget> root, const bool& done,
 bool has_layout();
 NORETURN void restart_layout();
 int getch(KeymapContext km = KMC_DEFAULT);
+#ifdef USE_TILE_LOCAL
+// For layouts taken off and put back around every event (to be drawn over
+// something that isn't a layout): push and pop them without the mouse
+// leaving and entering them each time, which would end any click on them
+// (and a pop or push would make the UI ignore the release anyway). While
+// they're off, the UI still thinks the mouse is over them: update_hover()
+// before letting go of any of them for good.
+void push_layout_steady(shared_ptr<Widget> root,
+                        KeymapContext km = KMC_DEFAULT);
+void pop_layout_steady();
+void update_hover();
+#endif
+
 void force_render();
 void render();
 void delay(unsigned int ms);

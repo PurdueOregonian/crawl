@@ -126,6 +126,7 @@ struct HiDPIState
 
     constexpr int get_device() const { return device; };
     constexpr int get_logical() const { return logical; };
+    constexpr int get_game_scale() const { return game_scale; };
 
     /**
      * Apply the game scale to some dimension n. This is necessary for things
@@ -144,6 +145,14 @@ private:
 
 class FontWrapper;
 class crawl_view_buffer;
+
+// Where the inventory panel shows an item in the inventory (you.inv[slot]),
+// in window pixels.
+struct inventory_spot
+{
+    int x, y, w, h;
+    int slot;
+};
 
 class TilesFramework
 {
@@ -178,6 +187,9 @@ public:
     void update_minimap_bounds();
     void toggle_inventory_display();
     void update_tabs();
+    // Where the inventory panel shows each item, if it's showing (as of the
+    // last redraw): so another computer can look at them (see lan.cc).
+    vector<inventory_spot> inventory_spots() const;
 
     void set_need_redraw();
     bool need_redraw(unsigned int min_tick_delay = 0) const;

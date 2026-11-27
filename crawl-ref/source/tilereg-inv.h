@@ -3,10 +3,16 @@
 
 #include "tilereg-grid.h"
 
+struct inventory_spot;
+
 class InventoryRegion : public GridRegion
 {
 public:
     InventoryRegion(const TileRegionInit &init);
+
+    // Where each item in the inventory is shown (see
+    // TilesFramework::inventory_spots()).
+    vector<inventory_spot> spots();
 
     virtual void update() override;
     virtual int handle_mouse(wm_mouse_event &event) override;

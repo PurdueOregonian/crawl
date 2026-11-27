@@ -121,9 +121,11 @@ it for private networks. All computers need the same version of Crawl.
   their own player's view, refreshed as the game goes on. Under the stats,
   a green **YOUR TURN** or a grey "Waiting: Player N's turn" says which.
 - While you wait, `i` opens your inventory menu as it stood after the last
-  move: pick an item to read its description, but nothing can be used,
-  worn or dropped from it. `i` or Escape closes it, and it closes by itself
-  when your turn comes. The game carries on meanwhile.
+  move: pick an item (its letter, or a click) to read its description, but
+  nothing can be used, worn or dropped from it. `i` or Escape closes it, and
+  it closes by itself when your turn comes. Clicking an item in the side
+  panel (left or right button) shows its description too. The game carries
+  on meanwhile.
 - Only the host's computer runs the game (and saves it). If a player's
   computer disconnects, the host plays them from then on.
 - The joining copy only shows pictures of the host's screen, scaled to fit
@@ -140,7 +142,10 @@ it for private networks. All computers need the same version of Crawl.
   **Join LAN Game** and gets their own player back, whatever order they join
   in. Someone without a copy gets the first player nobody has taken. The
   game carries on once everyone is back. On the waiting screen:
-  - **Enter** carries on now; missing players are played at the host.
+  - **Enter, Enter** carries on now; missing players are played at the
+    host, and are saved that way from then on (so a later load won't wait
+    for them). Keys in the first moment after the screen appears are
+    ignored, so the Enter that loaded the game can't do this.
   - **Esc** stops hosting.
   - **D, D** deletes the game for good, along with the copies of anyone who
     has joined.
